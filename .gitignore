@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+tally_data.db
+python/
+*.egg-info/
+.streamlit/
