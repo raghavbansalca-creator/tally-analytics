@@ -240,31 +240,48 @@ def _detect_business_nature(cur, profile):
     except:
         pass
 
-    # Signal 2: Voucher types — Manufacturing Journal, Job Work, Stock Journal
+    # Signal 2: Voucher types — check ACTUAL USAGE, not just type definitions
+    # (TONOTO has Job Work types defined but never uses them)
     try:
         cur.execute("SELECT NAME, PARENT FROM mst_voucher_type")
         vtypes = [(row["NAME"].upper(), (row["PARENT"] or "").upper()) for row in cur.fetchall()]
         signals["voucher_types"] = [v[0] for v in vtypes]
 
-        mfg_vtypes = [v for v in vtypes if any(kw in v[0] for kw in
-                      ["MANUFACTURING", "PRODUCTION", "JOB WORK", "STOCK JOURNAL"])]
-        if mfg_vtypes:
-            scores["Manufacturing"] += len(mfg_vtypes) * 4
-            signals["manufacturing_voucher_types"] = [v[0] for v in mfg_vtypes]
-
-        # Check for MFGJOURNAL flag in vouchers
+        # Only count manufacturing if types are ACTUALLY USED in vouchers
         cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(MFGJOURNAL) = 'YES'")
         mfg_vch_count = cur.fetchone()[0]
         if mfg_vch_count > 0:
-            scores["Manufacturing"] += 8
+            scores["Manufacturing"] += 10  # Strong signal — actual manufacturing entries
             signals["manufacturing_voucher_count"] = mfg_vch_count
+
+        # Check if manufacturing voucher types have actual transactions
+        cur.execute("""
+            SELECT VOUCHERTYPENAME, COUNT(*) as cnt FROM trn_voucher
+            WHERE UPPER(VOUCHERTYPENAME) IN ('STOCK JOURNAL', 'MANUFACTURING JOURNAL')
+            GROUP BY VOUCHERTYPENAME
+        """)
+        used_mfg_types = {row[0]: row[1] for row in cur.fetchall()}
+        if used_mfg_types:
+            scores["Manufacturing"] += sum(min(v, 5) for v in used_mfg_types.values())
+            signals["used_manufacturing_types"] = used_mfg_types
+        else:
+            # Types exist but not used — weak signal, just +1
+            mfg_vtypes = [v for v in vtypes if any(kw in v[0] for kw in
+                          ["MANUFACTURING", "PRODUCTION", "JOB WORK", "STOCK JOURNAL"])]
+            if mfg_vtypes:
+                scores["Manufacturing"] += 1  # Weak — defined but unused
+                signals["defined_but_unused_mfg_types"] = [v[0] for v in mfg_vtypes]
     except:
         pass
 
-    # Signal 3: Stock items existence and nature
+    # Signal 3: Stock items — scale score by count (1 item vs 185 items is very different)
     stock_count = profile["stats"].get("mst_stock_item", 0)
-    if stock_count > 0:
-        scores["Trading"] += 5
+    if stock_count > 20:
+        scores["Trading"] += 7  # Strong inventory presence
+        signals["has_stock_items"] = True
+        signals["stock_item_count"] = stock_count
+    elif stock_count > 0:
+        scores["Trading"] += 2  # Minimal inventory
         signals["has_stock_items"] = True
         signals["stock_item_count"] = stock_count
     else:
@@ -370,27 +387,46 @@ def _detect_industry(cur, profile):
     except:
         pass
 
-    # ── REAL ESTATE / CONSTRUCTION ──
+    # ── E-COMMERCE / D2C ──
     try:
+        ecom_keywords = ["RAZORPAY", "SHIPROCKET", "SHOPIFY", "AMAZON", "FLIPKART",
+                         "MEESHO", "PAYTM MALL", "INSTAMOJO", "CASHFREE", "PHONEPE",
+                         "DELHIVERY", "ECOM", "COD", "PREPAID ORDER", "MARKETPLACE"]
+        cur.execute("SELECT NAME FROM mst_ledger")
+        all_ledgers = [row[0].upper() for row in cur.fetchall()]
+        ecom_matches = [l for l in all_ledgers if any(kw in l for kw in ecom_keywords)]
+        if ecom_matches:
+            scores["E-commerce/D2C"] += len(ecom_matches) * 2
+            signals["ecommerce_ledgers"] = ecom_matches[:10]
+    except:
+        pass
+
+    # ── REAL ESTATE / CONSTRUCTION ── (tightened — need STRONG signals)
+    try:
+        # Only count strong real estate signals — not generic words like "project" or "site"
         cur.execute("""
             SELECT NAME FROM mst_ledger
-            WHERE UPPER(NAME) LIKE '%PROJECT%' OR UPPER(NAME) LIKE '%CONSTRUCTION%'
-            OR UPPER(NAME) LIKE '%BUILDING%' OR UPPER(NAME) LIKE '%FLAT%'
-            OR UPPER(NAME) LIKE '%PLOT%' OR UPPER(NAME) LIKE '%SITE%'
+            WHERE UPPER(NAME) LIKE '%CONSTRUCTION%'
+            OR UPPER(NAME) LIKE '%BUILDER%'
+            OR UPPER(NAME) LIKE '%FLAT NO%' OR UPPER(NAME) LIKE '%PLOT NO%'
+            OR UPPER(NAME) LIKE '%RERA%'
             OR UPPER(NAME) LIKE '%WIP%CONSTRUCTION%'
+            OR UPPER(NAME) LIKE '%UNDER CONSTRUCTION%'
         """)
         realestate_ledgers = [row[0] for row in cur.fetchall()]
         if realestate_ledgers:
-            scores["Real Estate"] += len(realestate_ledgers) * 2
+            scores["Real Estate"] += len(realestate_ledgers) * 3
             signals["realestate_ledgers"] = realestate_ledgers
 
+        # Strong signal: groups named for construction
         cur.execute("""
             SELECT NAME FROM mst_group
-            WHERE UPPER(NAME) LIKE '%CONSTRUCTION%' OR UPPER(NAME) LIKE '%PROJECT%'
+            WHERE UPPER(NAME) LIKE '%CONSTRUCTION%' OR UPPER(NAME) LIKE '%REAL ESTATE%'
+            OR UPPER(NAME) LIKE '%PROJECTS%WIP%' OR UPPER(NAME) LIKE '%PROPERTY%'
         """)
         re_groups = [row[0] for row in cur.fetchall()]
         if re_groups:
-            scores["Real Estate"] += len(re_groups) * 3
+            scores["Real Estate"] += len(re_groups) * 4
     except:
         pass
 
@@ -429,9 +465,31 @@ def _detect_industry(cur, profile):
     except:
         pass
 
-    # ── HOSPITAL / HEALTHCARE ──
+    # ── HANDICRAFTS / ARTISAN ──
     try:
-        cur.execute("SELECT NAME FROM mst_ledger WHERE UPPER(NAME) LIKE '%PATIENT%' OR UPPER(NAME) LIKE '%CONSULTATION%' OR UPPER(NAME) LIKE '%OPD%' OR UPPER(NAME) LIKE '%IPD%' OR UPPER(NAME) LIKE '%HOSPITAL%'")
+        craft_keywords = ["HANDICRAFT", "HANDMADE", "ARTISAN", "CRAFT", "KARIGAR",
+                          "EXPORT PROMOTION COUNCIL", "EPCH", "COTTAGE INDUSTRY"]
+        cur.execute("SELECT NAME FROM mst_ledger")
+        all_ldg = [row[0].upper() for row in cur.fetchall()]
+        craft_matches = [l for l in all_ldg if any(kw in l for kw in craft_keywords)]
+        # Also check company name
+        if any(kw in profile.get("company_name", "").upper() for kw in craft_keywords):
+            scores["Handicrafts"] += 6
+            signals["company_name_handicraft"] = True
+        if craft_matches:
+            scores["Handicrafts"] += len(craft_matches) * 2
+            signals["handicraft_ledgers"] = craft_matches[:10]
+    except:
+        pass
+
+    # ── HOSPITAL / HEALTHCARE ── (tightened — "HOSPITALITY" is NOT hospital)
+    try:
+        cur.execute("""SELECT NAME FROM mst_ledger
+            WHERE (UPPER(NAME) LIKE '%PATIENT%' OR UPPER(NAME) LIKE '%CONSULTATION FEE%'
+            OR UPPER(NAME) LIKE '%OPD %' OR UPPER(NAME) LIKE '%IPD %'
+            OR UPPER(NAME) LIKE '%HOSPITAL %' OR UPPER(NAME) LIKE '%CLINIC%')
+            AND UPPER(NAME) NOT LIKE '%HOSPITALITY%'
+        """)
         hospital_ledgers = [row[0] for row in cur.fetchall()]
         if hospital_ledgers:
             scores["Hospital"] += len(hospital_ledgers) * 3
