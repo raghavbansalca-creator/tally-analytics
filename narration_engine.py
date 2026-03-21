@@ -101,11 +101,11 @@ CATEGORIES = [
         "name": "Contractor Payments",
         "patterns": [
             r"\bcontractor\b", r"\bsub-contractor\b",
-            r"\blabour\s+(?:charge|cost|payment|work|contract)\b",
+            r"\blabour\s+(?:charges?|cost|payment|work|contract|worker|chowk)\b",
             r"\b(?:paid|payment)\s+(?:to|for)\s+labour\b",
-            # BUG 6 FIX: require context for "labour" (not standalone like "Labour Day")
+            r"\b\d+\s+(?:labour|worker|painter|mason|carpenter|plumber|electrician)\s+worker\b",
             r"\bworks contract\b", r"\bjob work\b", r"\bfabrication\b",
-            r"\bconstruction\b",
+            r"\bconstruction\s+(?:work|site|charge|cost|material)\b",
         ],
         "comment": "Contractor payment - verify TDS u/s 194C",
         "severity": "LOW",
