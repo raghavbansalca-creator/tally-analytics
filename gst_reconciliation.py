@@ -767,9 +767,14 @@ def get_books_sales(db_path, from_date, to_date):
         return []
 
     placeholders = ",".join(["?"] * len(all_output))
+
+    # Check if CONSIGNEEGSTIN column exists (not all Tally exports include it)
+    _vch_cols = [row[1] for row in conn.execute("PRAGMA table_info(trn_voucher)").fetchall()]
+    _consignee_col = "v.CONSIGNEEGSTIN" if "CONSIGNEEGSTIN" in _vch_cols else "''"
+
     vouchers = conn.execute(f"""
         SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME,
-               v.PARTYGSTIN, v.CONSIGNEEGSTIN, v.PLACEOFSUPPLY, v.VOUCHERTYPENAME
+               v.PARTYGSTIN, {_consignee_col}, v.PLACEOFSUPPLY, v.VOUCHERTYPENAME
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         WHERE a.LEDGERNAME IN ({placeholders})

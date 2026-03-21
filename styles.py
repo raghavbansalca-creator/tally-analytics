@@ -454,6 +454,93 @@ table.slv-table tr.total-row td {
     border-top: 1px solid #f1f5f9;
 }
 
+/* -- MATERIAL ICONS FONT (needed for sidebar toggle) ----------------- */
+@import url('https://fonts.googleapis.com/icon?family=Material+Symbols+Rounded');
+
+/* -- FIX SIDEBAR TOGGLE BUTTON TEXT ---------------------------------- */
+/* When Material Icons font fails to load, icon name shows as plain text.
+   We target ALL sidebar toggle buttons by their data-testid attributes. */
+
+/* Hide ALL Material Icon text leaks throughout the app */
+[data-testid="stIconMaterial"] {
+    font-size: 0px !important;
+    color: transparent !important;
+    overflow: hidden !important;
+    width: 0px !important;
+    height: 0px !important;
+    display: none !important;
+}
+
+/* Expand sidebar button (appears in header when sidebar is collapsed) */
+[data-testid="stExpandSidebarButton"] {
+    overflow: hidden !important;
+    width: 32px !important;
+    height: 32px !important;
+    padding: 0 !important;
+    font-size: 0px !important;
+    color: transparent !important;
+    position: relative !important;
+}
+[data-testid="stExpandSidebarButton"]::after {
+    content: "\\203A" !important;
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+    color: #64748b !important;
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    font-family: 'Inter', sans-serif !important;
+}
+
+/* Collapse sidebar button (appears in sidebar header) */
+[data-testid="stSidebarCollapseButton"] {
+    overflow: hidden !important;
+    max-width: 36px !important;
+    max-height: 36px !important;
+}
+[data-testid="stSidebarCollapseButton"] button {
+    overflow: hidden !important;
+    width: 32px !important;
+    height: 32px !important;
+    padding: 0 !important;
+    font-size: 0px !important;
+    color: transparent !important;
+    position: relative !important;
+}
+[data-testid="stSidebarCollapseButton"] button::after {
+    content: "\\2039" !important;
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+    color: #64748b !important;
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    font-family: 'Inter', sans-serif !important;
+}
+
+/* Legacy collapsed control */
+[data-testid="collapsedControl"] {
+    overflow: hidden !important;
+    max-width: 36px !important;
+    max-height: 36px !important;
+}
+[data-testid="collapsedControl"] button {
+    overflow: hidden !important;
+    width: 32px !important;
+    height: 32px !important;
+    padding: 0 !important;
+    font-size: 0px !important;
+    color: transparent !important;
+    position: relative !important;
+}
+
+/* Expander toggle arrows (keyboard_arrow_right) */
+[data-testid="stExpander"] [data-testid="stIconMaterial"] {
+    display: none !important;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
