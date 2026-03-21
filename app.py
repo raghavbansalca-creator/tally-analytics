@@ -176,22 +176,27 @@ with st.sidebar:
     _max_date_row = conn.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
     _min_dt = datetime.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else datetime.date(2025, 4, 1)
     _max_dt = datetime.date(int(_max_date_row[0][:4]), int(_max_date_row[0][4:6]), int(_max_date_row[0][6:8])) if _max_date_row and _max_date_row[0] else datetime.date.today()
-    if "global_start_date" not in st.session_state:
-        st.session_state.global_start_date = _min_dt
-    if "global_end_date" not in st.session_state:
-        st.session_state.global_end_date = _max_dt
+    if "applied_start_date" not in st.session_state:
+        st.session_state.applied_start_date = _min_dt
+    if "applied_end_date" not in st.session_state:
+        st.session_state.applied_end_date = _max_dt
     st.markdown("### Date Range")
-    _from = st.date_input("From", value=st.session_state.global_start_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_from")
-    _to = st.date_input("To", value=st.session_state.global_end_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_to")
-    st.session_state.global_start_date = _from
-    st.session_state.global_end_date = _to
-    DATE_FROM = _from.strftime("%Y%m%d")
-    DATE_TO = _to.strftime("%Y%m%d")
-    st.caption(f"Showing: {_from.strftime('%d %b %Y')} to {_to.strftime('%d %b %Y')}")
-    if st.button("Reset to Full Period", key="app_reset_dates"):
-        st.session_state.global_start_date = _min_dt
-        st.session_state.global_end_date = _max_dt
-        st.rerun()
+    _from = st.date_input("From", value=st.session_state.applied_start_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_from")
+    _to = st.date_input("To", value=st.session_state.applied_end_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_to")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Apply", key="app_apply_dates", use_container_width=True, type="primary"):
+            st.session_state.applied_start_date = _from
+            st.session_state.applied_end_date = _to
+            st.rerun()
+    with c2:
+        if st.button("Reset", key="app_reset_dates", use_container_width=True):
+            st.session_state.applied_start_date = _min_dt
+            st.session_state.applied_end_date = _max_dt
+            st.rerun()
+    DATE_FROM = st.session_state.applied_start_date.strftime("%Y%m%d")
+    DATE_TO = st.session_state.applied_end_date.strftime("%Y%m%d")
+    st.caption(f"Showing: {st.session_state.applied_start_date.strftime('%d %b %Y')} — {st.session_state.applied_end_date.strftime('%d %b %Y')}")
     st.markdown("---")
 
     if st.button("🏠 Home", use_container_width=True):

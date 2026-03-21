@@ -198,26 +198,33 @@ if not tds_ledgers:
 # ======================================================================
 
 with st.sidebar:
+    import datetime as _dt
+    _min_date_row = conn.execute("SELECT MIN(DATE) FROM trn_voucher").fetchone()
+    _max_date_row = conn.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
+    _min_dt = _dt.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else _dt.date(2025, 4, 1)
+    _max_dt = _dt.date(int(_max_date_row[0][:4]), int(_max_date_row[0][4:6]), int(_max_date_row[0][6:8])) if _max_date_row and _max_date_row[0] else _dt.date.today()
+    if "applied_start_date" not in st.session_state:
+        st.session_state.applied_start_date = _min_dt
+    if "applied_end_date" not in st.session_state:
+        st.session_state.applied_end_date = _max_dt
     st.markdown("### Date Range")
-    if tds_months:
-        month_options = ["All Months"] + [m[1] for m in tds_months]
-        month_codes = [None] + [m[0] for m in tds_months]
-
-        sel_idx = st.selectbox("Period", range(len(month_options)),
-                               format_func=lambda i: month_options[i],
-                               key="tds_period_select")
-        sel_month_code = month_codes[sel_idx]
-
-        if sel_month_code:
-            date_from = sel_month_code + "01"
-            # End of month: use last possible day
-            date_to = sel_month_code + "31"
-        else:
-            date_from = None
-            date_to = None
-    else:
-        date_from = None
-        date_to = None
+    _from = st.date_input("From", value=st.session_state.applied_start_date, min_value=_min_dt, max_value=_max_dt, key="tds_filter_from")
+    _to = st.date_input("To", value=st.session_state.applied_end_date, min_value=_min_dt, max_value=_max_dt, key="tds_filter_to")
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        if st.button("Apply", key="tds_apply_dates", use_container_width=True, type="primary"):
+            st.session_state.applied_start_date = _from
+            st.session_state.applied_end_date = _to
+            st.rerun()
+    with _c2:
+        if st.button("Reset", key="tds_reset_dates", use_container_width=True):
+            st.session_state.applied_start_date = _min_dt
+            st.session_state.applied_end_date = _max_dt
+            st.rerun()
+    date_from = st.session_state.applied_start_date.strftime("%Y%m%d")
+    date_to = st.session_state.applied_end_date.strftime("%Y%m%d")
+    st.caption(f"Showing: {st.session_state.applied_start_date.strftime('%d %b %Y')} — {st.session_state.applied_end_date.strftime('%d %b %Y')}")
+    if not tds_months:
         st.info("No TDS transactions found.")
 
     st.markdown("---")
