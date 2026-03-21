@@ -16,86 +16,12 @@ from tally_reports import (
     BS_ASSET_ROOTS, BS_LIABILITY_ROOTS,
     PL_INCOME_ROOTS, PL_EXPENSE_ROOTS,
 )
+from styles import inject_base_styles, page_header, section_header, metric_card, breadcrumb_html, fmt, fmt_full
 
 st.set_page_config(page_title="Seven Labs Vision", page_icon="📊", layout="wide")
 
 # ── STYLES ───────────────────────────────────────────────────────────────────
-
-st.markdown("""
-<style>
-    /* Remove default padding */
-    .block-container { padding-top: 1rem; }
-
-    /* Clickable group cards */
-    .group-card {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 12px 16px;
-        margin: 4px 0;
-        border-left: 4px solid #2E75B6;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    .group-card:hover { background: #e9ecef; transform: translateX(4px); }
-    .group-card-income { border-left-color: #28a745; }
-    .group-card-expense { border-left-color: #dc3545; }
-    .group-card-asset { border-left-color: #007bff; }
-    .group-card-liability { border-left-color: #6f42c1; }
-
-    /* Amount styling */
-    .amount { font-family: 'Courier New', monospace; font-weight: 600; }
-    .amount-positive { color: #28a745; }
-    .amount-negative { color: #dc3545; }
-
-    /* Breadcrumb */
-    .breadcrumb {
-        font-size: 0.85rem;
-        color: #666;
-        margin-bottom: 1rem;
-        padding: 8px 12px;
-        background: #f0f2f6;
-        border-radius: 6px;
-    }
-    .breadcrumb a { color: #2E75B6; text-decoration: none; cursor: pointer; }
-
-    /* Header */
-    .report-title {
-        font-size: 1.6rem;
-        font-weight: 700;
-        margin-bottom: 0.3rem;
-    }
-    .company-name { color: #666; font-size: 1rem; margin-bottom: 1.5rem; }
-
-    /* Totals bar */
-    .totals-bar {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        color: white;
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 1.5rem;
-    }
-    .totals-bar h3 { margin: 0; font-size: 0.85rem; opacity: 0.7; text-transform: uppercase; }
-    .totals-bar .big-number { font-size: 1.8rem; font-weight: 700; margin: 4px 0; }
-
-    /* Button styling for clickable rows */
-    div.stButton > button {
-        width: 100%;
-        text-align: left;
-        background: white;
-        border: 1px solid #e0e0e0;
-        border-radius: 6px;
-        padding: 8px 16px;
-        margin: 2px 0;
-        transition: all 0.15s;
-        font-size: 0.9rem;
-    }
-    div.stButton > button:hover {
-        background: #f0f7ff;
-        border-color: #2E75B6;
-        transform: translateX(4px);
-    }
-</style>
-""", unsafe_allow_html=True)
+inject_base_styles()
 
 
 # ── STATE MANAGEMENT ─────────────────────────────────────────────────────────
@@ -134,27 +60,6 @@ def go_ledger(ledger_name):
     st.session_state.view = "ledger"
     st.session_state.drill_ledger = ledger_name
 
-
-def fmt(amount):
-    """Format amount in Indian numbering with ₹ sign."""
-    if amount is None:
-        return "₹0"
-    abs_amt = abs(amount)
-    if abs_amt >= 10000000:
-        return f"₹{abs_amt/10000000:,.2f} Cr"
-    elif abs_amt >= 100000:
-        return f"₹{abs_amt/100000:,.2f} L"
-    elif abs_amt >= 1000:
-        return f"₹{abs_amt:,.0f}"
-    else:
-        return f"₹{abs_amt:,.2f}"
-
-
-def fmt_full(amount):
-    """Full formatted amount."""
-    if amount is None:
-        return "₹0.00"
-    return f"₹{abs(amount):,.2f}"
 
 
 # ── SIDEBAR ──────────────────────────────────────────────────────────────────
@@ -227,15 +132,13 @@ def show_breadcrumb():
                     go_home()
                 st.rerun()
         with cols[1]:
-            st.markdown(f'<div class="breadcrumb">{"  ›  ".join(parts)}</div>',
-                       unsafe_allow_html=True)
+            breadcrumb_html(parts)
 
 
 # ── HOME VIEW ────────────────────────────────────────────────────────────────
 
 def show_home():
-    st.markdown(f'<div class="report-title">Dashboard</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="company-name">{company_name}</div>', unsafe_allow_html=True)
+    page_header("Dashboard", company_name)
 
     pl = profit_and_loss(conn)
     bs = balance_sheet(conn)
@@ -249,7 +152,7 @@ def show_home():
                 delta_color="normal" if pl["net_profit"] >= 0 else "inverse")
     col4.metric("Total Assets", fmt(bs["total_assets"]))
 
-    st.markdown("---")
+    section_header("Overview")
 
     col1, col2 = st.columns(2)
 
@@ -301,8 +204,7 @@ def show_home():
 # ── P&L VIEW ─────────────────────────────────────────────────────────────────
 
 def show_pl():
-    st.markdown(f'<div class="report-title">Profit & Loss Account</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="company-name">{company_name}</div>', unsafe_allow_html=True)
+    page_header("Profit & Loss Account", company_name)
 
     pl = profit_and_loss(conn)
 
@@ -317,7 +219,7 @@ def show_pl():
                 delta="Profit" if pl["net_profit"] >= 0 else "Loss",
                 delta_color="normal" if pl["net_profit"] >= 0 else "inverse")
 
-    st.markdown("---")
+    section_header("Breakdown")
 
     inc_col, exp_col = st.columns(2)
 
@@ -347,8 +249,7 @@ def show_pl():
 # ── BALANCE SHEET VIEW ───────────────────────────────────────────────────────
 
 def show_bs():
-    st.markdown(f'<div class="report-title">Balance Sheet</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="company-name">{company_name}</div>', unsafe_allow_html=True)
+    page_header("Balance Sheet", company_name)
 
     bs = balance_sheet(conn)
 
@@ -356,7 +257,7 @@ def show_bs():
     col1.metric("Total Assets", fmt(bs["total_assets"]))
     col2.metric("Total Liabilities", fmt(bs["total_liabilities"]))
 
-    st.markdown("---")
+    section_header("Details")
 
     a_col, l_col = st.columns(2)
 
@@ -384,9 +285,7 @@ def show_bs():
 
 def show_group():
     group_name = st.session_state.drill_group
-    st.markdown(f'<div class="report-title">{group_name}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="company-name">Ledger-wise breakup — Click any ledger to see transactions</div>',
-                unsafe_allow_html=True)
+    page_header(group_name, "Ledger-wise breakup — Click any ledger to see transactions")
 
     # Get ledgers in this group
     rows = conn.execute("""
@@ -415,7 +314,7 @@ def show_group():
 
     total = sum(abs(b or 0) for _, b in rows)
     st.metric(f"Total — {group_name}", fmt(total), f"{len(rows)} ledgers")
-    st.markdown("---")
+    section_header("Ledgers")
 
     # Show all ledgers as clickable buttons
     for name, balance in rows:
@@ -432,7 +331,7 @@ def show_group():
 
 def show_ledger():
     ledger_name = st.session_state.drill_ledger
-    st.markdown(f'<div class="report-title">{ledger_name}</div>', unsafe_allow_html=True)
+    page_header(ledger_name)
 
     # Get ledger info
     info = conn.execute("""
@@ -442,7 +341,7 @@ def show_ledger():
 
     if info:
         parent, opening, closing = info
-        st.markdown(f'<div class="company-name">Group: {parent}</div>', unsafe_allow_html=True)
+        st.caption(f"Group: {parent}")
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Opening Balance", fmt_full(opening or 0))
@@ -452,7 +351,7 @@ def show_ledger():
                     delta=f"{'Dr' if movement < 0 else 'Cr'}",
                     delta_color="off")
 
-    st.markdown("---")
+    section_header("Transactions")
 
     # Get all transactions
     opening_bal, transactions, closing_bal = ledger_detail(conn, ledger_name)
@@ -494,7 +393,7 @@ def show_ledger():
     # Summary at bottom
     total_dr = sum(t["debit"] for t in transactions if t["debit"])
     total_cr = sum(t["credit"] for t in transactions if t["credit"])
-    st.markdown("---")
+    section_header("Summary")
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Debit", fmt_full(total_dr))
     col2.metric("Total Credit", fmt_full(total_cr))
@@ -506,9 +405,7 @@ def show_ledger():
 def show_debtors_creditors(report_type):
     is_debtors = report_type == "debtors"
     title = "Sundry Debtors — Outstanding Receivables" if is_debtors else "Sundry Creditors — Outstanding Payables"
-    st.markdown(f'<div class="report-title">{title}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="company-name">{company_name} — Click any party to see transactions</div>',
-                unsafe_allow_html=True)
+    page_header(title, f"{company_name} — Click any party to see transactions")
 
     data = debtor_aging(conn) if is_debtors else creditor_aging(conn)
 
@@ -519,7 +416,7 @@ def show_debtors_creditors(report_type):
     total = sum(b for _, b in data)
     st.metric(f"Total {'Receivable' if is_debtors else 'Payable'}",
               fmt(total), f"{len(data)} parties")
-    st.markdown("---")
+    section_header("Parties")
 
     # Sort by amount descending
     data_sorted = sorted(data, key=lambda x: x[1], reverse=True)
@@ -598,7 +495,7 @@ else:
 
 # Show search results from chat if any
 if "chat_results" in st.session_state and st.session_state.chat_results:
-    st.markdown("---")
+    st.markdown("")
     st.markdown(f"**Search results for: {st.session_state.get('chat_query', '')}**")
     for name, parent, bal in st.session_state.chat_results:
         if st.button(f"{name} ({parent}) — {fmt_full(bal)}", key=f"chat_sr_{name}"):
@@ -610,13 +507,13 @@ if "chat_results" in st.session_state and st.session_state.chat_results:
 
 # Show chat message if any
 if "chat_message" in st.session_state and st.session_state.chat_message:
-    st.markdown("---")
+    st.markdown("")
     st.info(st.session_state.chat_message)
     del st.session_state["chat_message"]
 
 # Show voucher summary if requested
 if st.session_state.get("show_voucher_summary"):
-    st.markdown("---")
+    st.markdown("")
     from tally_reports import voucher_summary
     data = voucher_summary(conn)
     if data:
@@ -629,7 +526,7 @@ conn.close()
 
 # ── PERSISTENT CHAT BAR AT BOTTOM ────────────────────────────────────────────
 
-st.markdown("---")
+st.markdown("")
 chat_input = st.chat_input("Ask anything — P&L, Balance Sheet, ledger of [party], debtors, creditors...")
 if chat_input:
     from chat_engine import ask, format_result_as_text

@@ -19,8 +19,10 @@ from gst_engine import (
     COMPANY_GSTIN, COMPANY_STATE, DB_PATH,
 )
 from tally_reports import ledger_detail
+from styles import inject_base_styles, page_header, section_header, metric_card
 
 st.set_page_config(page_title="GST Returns \u2014 SLV", page_icon="\U0001f9fe", layout="wide")
+inject_base_styles()
 
 # ======================================================================
 #  SESSION STATE DEFAULTS
@@ -40,125 +42,6 @@ for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ======================================================================
-#  CSS
-# ======================================================================
-
-st.markdown("""
-<style>
-    .gst-header {
-        background: linear-gradient(135deg, #0a1628 0%, #1a365d 100%);
-        color: white;
-        padding: 1.2rem 1.8rem;
-        border-radius: 12px;
-        margin-bottom: 1rem;
-    }
-    .gst-header h1 { color: white; margin: 0; font-size: 1.6rem; }
-    .gst-header p { color: #94a3b8; margin: 0.2rem 0 0 0; font-size: 0.9rem; }
-
-    .metric-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
-        text-align: center;
-    }
-    .metric-card .label { color: #64748b; font-size: 0.8rem; text-transform: uppercase; }
-    .metric-card .value { color: #1e293b; font-size: 1.3rem; font-weight: 700; }
-    .metric-card .value.green { color: #16a34a; }
-    .metric-card .value.red { color: #dc2626; }
-    .metric-card .value.blue { color: #2563eb; }
-
-    .section-3b {
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1.2rem;
-        margin-bottom: 1rem;
-    }
-    .section-3b h3 {
-        color: #1e3a5f;
-        font-size: 1rem;
-        border-bottom: 2px solid #e2e8f0;
-        padding-bottom: 0.5rem;
-        margin-bottom: 0.8rem;
-    }
-
-    table.gst-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.85rem;
-    }
-    table.gst-table th {
-        background: #f1f5f9;
-        color: #475569;
-        padding: 0.5rem 0.8rem;
-        text-align: right;
-        font-weight: 600;
-        border-bottom: 2px solid #e2e8f0;
-    }
-    table.gst-table th:first-child { text-align: left; }
-    table.gst-table td {
-        padding: 0.5rem 0.8rem;
-        text-align: right;
-        border-bottom: 1px solid #f1f5f9;
-        color: #334155;
-    }
-    table.gst-table td:first-child { text-align: left; }
-    table.gst-table tr.total-row td {
-        font-weight: 700;
-        border-top: 2px solid #1e3a5f;
-        color: #1e3a5f;
-    }
-    table.gst-table tr:hover { background: #f8fafc; }
-
-    .inv-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.82rem;
-    }
-    .inv-table th {
-        background: #1e3a5f;
-        color: white;
-        padding: 0.5rem 0.6rem;
-        text-align: right;
-        font-weight: 600;
-    }
-    .inv-table th:first-child, .inv-table th:nth-child(2), .inv-table th:nth-child(3), .inv-table th:nth-child(4) {
-        text-align: left;
-    }
-    .inv-table td {
-        padding: 0.45rem 0.6rem;
-        text-align: right;
-        border-bottom: 1px solid #e2e8f0;
-        color: #334155;
-    }
-    .inv-table td:first-child, .inv-table td:nth-child(2), .inv-table td:nth-child(3), .inv-table td:nth-child(4) {
-        text-align: left;
-    }
-    .inv-table tr:hover { background: #eff6ff; }
-    .inv-table tr.total-row td {
-        font-weight: 700;
-        border-top: 2px solid #1e3a5f;
-        background: #f1f5f9;
-    }
-
-    .voucher-box {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1.2rem;
-        margin-bottom: 1rem;
-    }
-
-    div.stButton > button {
-        padding: 0.1rem 0.3rem;
-        font-size: 0.8rem;
-        min-height: 0;
-        line-height: 1.2;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # ======================================================================
 #  HELPERS
@@ -216,12 +99,7 @@ conn = get_conn()
 months = get_available_months(conn)
 month_codes = [m[0] for m in months]
 
-st.markdown(f"""
-<div class="gst-header">
-    <h1>GST Returns Dashboard</h1>
-    <p>GSTIN: {COMPANY_GSTIN} &nbsp;|&nbsp; State: {COMPANY_STATE} &nbsp;|&nbsp; FY 2025-26</p>
-</div>
-""", unsafe_allow_html=True)
+page_header("GST Returns Dashboard", f"GSTIN: {COMPANY_GSTIN} | State: {COMPANY_STATE} | FY 2025-26")
 
 # ======================================================================
 #  MONTH SELECTOR BAR
@@ -267,31 +145,19 @@ if view == "summary":
     # Top metrics
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">Output Tax</div>
-            <div class="value red">{fi(s31['net_total_tax'])}</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("Output Tax", fi(s31['net_total_tax']), color_class="red")
     with m2:
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">Input Tax Credit</div>
-            <div class="value green">{fi(s4['net_itc_total'])}</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("Input Tax Credit", fi(s4['net_itc_total']), color_class="green")
     with m3:
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">Net Payable</div>
-            <div class="value blue">{fi(s61['total_payable'])}</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("Net Payable", fi(s61['total_payable']), color_class="blue")
     with m4:
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">Taxable Turnover</div>
-            <div class="value">{fi(s31['net_taxable'])}</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("Taxable Turnover", fi(s31['net_taxable']))
 
     st.markdown("")
 
     # ── Section 3.1 Outward Supplies ──
-    st.markdown("""<div class="section-3b"><h3>3.1 Outward Supplies</h3>""", unsafe_allow_html=True)
-    html_31 = """<table class="gst-table">
+    st.markdown("""<div class="slv-card"><h3>3.1 Outward Supplies</h3>""", unsafe_allow_html=True)
+    html_31 = """<table class="slv-table slv-table--light">
     <tr><th>Nature of Supplies</th><th>Taxable Value</th><th>IGST</th><th>CGST</th><th>SGST</th><th>Total Tax</th></tr>"""
     html_31 += f"""<tr><td>Outward taxable supplies (other than zero/nil/exempted)</td>
         <td>{fi(s31['a_taxable'])}</td><td>{fi(s31['a_igst'])}</td>
@@ -329,8 +195,8 @@ if view == "summary":
     st.markdown("")
 
     # ── Section 4 Eligible ITC ──
-    st.markdown("""<div class="section-3b"><h3>4. Eligible ITC</h3>""", unsafe_allow_html=True)
-    html_4 = """<table class="gst-table">
+    st.markdown("""<div class="slv-card"><h3>4. Eligible ITC</h3>""", unsafe_allow_html=True)
+    html_4 = """<table class="slv-table slv-table--light">
     <tr><th>Details</th><th>IGST</th><th>CGST</th><th>SGST</th><th>Total</th></tr>"""
     html_4 += f"""<tr><td>ITC Available (from purchases)</td>
         <td>{fi(s4['itc_igst'])}</td><td>{fi(s4['itc_cgst'])}</td>
@@ -357,8 +223,8 @@ if view == "summary":
     st.markdown("")
 
     # ── Section 6.1 Payment ──
-    st.markdown("""<div class="section-3b"><h3>6.1 Payment of Tax</h3>""", unsafe_allow_html=True)
-    html_6 = """<table class="gst-table">
+    st.markdown("""<div class="slv-card"><h3>6.1 Payment of Tax</h3>""", unsafe_allow_html=True)
+    html_6 = """<table class="slv-table slv-table--light">
     <tr><th>Description</th><th>IGST</th><th>CGST</th><th>SGST</th><th>Total</th></tr>"""
     html_6 += f"""<tr><td>Tax Liability</td>
         <td>{fi(s61['igst_liability'])}</td><td>{fi(s61['cgst_liability'])}</td>
@@ -516,7 +382,7 @@ elif view == "hsn_summary":
     if not hsn_data:
         st.info("No HSN data for this month.")
     else:
-        html = """<table class="inv-table">
+        html = """<table class="slv-table">
         <tr><th>HSN Code</th><th>Description</th><th>Rate %</th><th>Taxable Value</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Total Tax</th></tr>"""
         for h in hsn_data:
             html += f"""<tr>
@@ -576,7 +442,7 @@ elif view == "voucher_detail":
             date, num, vtype, party, narration = hdr
             st.subheader(f"Voucher Detail  |  {vtype} #{num}")
 
-            st.markdown(f"""<div class="voucher-box">
+            st.markdown(f"""<div class="slv-voucher-box">
                 <b>Date:</b> {_format_date_display(date)} &nbsp;&nbsp;
                 <b>Number:</b> {num} &nbsp;&nbsp;
                 <b>Type:</b> {vtype} &nbsp;&nbsp;
@@ -602,7 +468,7 @@ elif view == "voucher_detail":
 
             st.markdown("**Accounting Entries:**")
 
-            html_e = """<table class="inv-table">
+            html_e = """<table class="slv-table">
             <tr><th>Ledger Name</th><th>Debit</th><th>Credit</th></tr>"""
             total_dr = 0
             total_cr = 0
@@ -664,7 +530,7 @@ elif view == "party_ledger":
 
         # Opening
         ob_type = "Dr" if opening < 0 else "Cr"
-        st.markdown(f"""<div class="voucher-box">
+        st.markdown(f"""<div class="slv-voucher-box">
             <b>Opening Balance:</b> {fi(abs(opening))} {ob_type} &nbsp;&nbsp;|&nbsp;&nbsp;
             <b>Transactions:</b> {len(txns)} &nbsp;&nbsp;|&nbsp;&nbsp;
             <b>Closing Balance:</b> {fi(abs(closing))} {"Dr" if closing < 0 else "Cr"}
@@ -733,7 +599,7 @@ elif view == "monthly_trends":
     comparison = gst_monthly_comparison(conn)
 
     if comparison:
-        html = """<table class="inv-table">
+        html = """<table class="slv-table">
         <tr><th>Month</th><th>Output Taxable</th><th>Output Tax</th><th>Input Taxable</th>
             <th>Input Tax (ITC)</th><th>Net Payable</th><th>Status</th></tr>"""
         for r in comparison:
