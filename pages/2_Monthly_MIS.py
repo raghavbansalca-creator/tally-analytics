@@ -17,7 +17,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sidebar_filters import render_sidebar_filters
 
 # ── PAGE CONFIG ──────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Monthly MIS — SLV", page_icon="📋", layout="wide")
+st.set_page_config(page_title="Monthly MIS — SLV", page_icon="M", layout="wide")
+
+import sys as _sys2, os as _os2
+_sys2.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from styles import inject_base_styles, page_header, section_header, metric_card, fmt, fmt_full, badge, footer
+inject_base_styles()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tally_data.db")
 
@@ -612,11 +617,11 @@ def render_drill_view(data, months, pnl, sorted_ledgers):
         st.markdown("**Click below to drill further:**")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button(f"📄 View Sales Invoices ({month_lbl})", key="gp_to_rev"):
+            if st.button(f"View Sales Invoices ({month_lbl})", key="gp_to_rev"):
                 go_drill("revenue", month_code)
                 st.rerun()
         with col2:
-            if st.button(f"📄 View Purchase Bills ({month_lbl})", key="gp_to_purch"):
+            if st.button(f"View Purchase Bills ({month_lbl})", key="gp_to_purch"):
                 go_drill("purchases", month_code)
                 st.rerun()
 
@@ -808,76 +813,6 @@ def main():
         render_drill_view(data, months, pnl, sorted_ledgers)
         return
 
-    # ── HEADER & STYLES ───────────────────────────────────────────────────────
-    st.markdown("""
-    <style>
-    .mis-header {
-        background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
-        padding: 1.5rem 2rem;
-        border-radius: 12px;
-        margin-bottom: 1.5rem;
-    }
-    .mis-header h1 {
-        color: #f8fafc;
-        font-size: 1.8rem;
-        margin: 0 0 0.3rem 0;
-    }
-    .mis-header p {
-        color: #94a3b8;
-        font-size: 0.95rem;
-        margin: 0;
-    }
-    .metric-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
-        text-align: center;
-    }
-    .metric-label {
-        font-size: 0.75rem;
-        color: #64748b;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 600;
-    }
-    .metric-value {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #1e293b;
-        margin: 0.2rem 0;
-    }
-    .metric-sub {
-        font-size: 0.8rem;
-        color: #94a3b8;
-    }
-    .metric-green { color: #10b981 !important; }
-    .metric-red { color: #ef4444 !important; }
-    .section-header {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #1e293b;
-        border-bottom: 2px solid #3b82f6;
-        padding-bottom: 0.4rem;
-        margin: 1.5rem 0 1rem 0;
-    }
-    .pnl-table th {
-        background: #1e293b !important;
-        color: #f8fafc !important;
-        font-size: 0.8rem;
-        padding: 8px 12px;
-    }
-    /* Drill buttons inside expander */
-    div[data-testid="stButton"] > button {
-        font-size: 0.72rem;
-        padding: 2px 8px;
-        min-height: 0;
-        height: auto;
-        line-height: 1.4;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
     try:
         _mis_conn = sqlite3.connect(DB_PATH)
         _mis_co = _mis_conn.execute("SELECT value FROM _metadata WHERE key='company_name'").fetchone()
@@ -885,12 +820,7 @@ def main():
         _mis_conn.close()
     except Exception:
         _mis_company = "Company"
-    st.markdown(f"""
-    <div class="mis-header">
-        <h1>{_mis_company} — Monthly MIS</h1>
-        <p>Management Information System &nbsp;|&nbsp; <em>Click any figure to drill down</em></p>
-    </div>
-    """, unsafe_allow_html=True)
+    page_header(f"{_mis_company} -- Monthly MIS", "Management Information System | Click any figure to drill down")
 
     # ── EXECUTIVE SUMMARY ────────────────────────────────────────────────────
     ytd_revenue = sum(pnl["Revenue (Net Sales)"])
@@ -919,56 +849,29 @@ def main():
     avg_monthly_net_outflow = abs(ytd_profit / len(months)) if ytd_profit < 0 else 0
     cash_runway = cash_balance / avg_monthly_net_outflow if avg_monthly_net_outflow > 0 else float('inf')
 
-    st.markdown('<div class="section-header">EXECUTIVE SUMMARY</div>', unsafe_allow_html=True)
+    section_header("EXECUTIVE SUMMARY")
 
+    profit_color = "green" if ytd_profit >= 0 else "red"
     cols = st.columns(5)
     with cols[0]:
-        profit_color = "metric-green" if ytd_profit >= 0 else "metric-red"
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">YTD Revenue</div>
-            <div class="metric-value">{fmt_lakhs(ytd_revenue)}</div>
-            <div class="metric-sub">{len(months)} months</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("YTD Revenue", fmt_lakhs(ytd_revenue), sub=f"{len(months)} months", color_class="blue")
     with cols[1]:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">YTD Net Profit/Loss</div>
-            <div class="metric-value {profit_color}">{fmt_lakhs(ytd_profit)}</div>
-            <div class="metric-sub">Net Margin: {fmt_pct(ytd_profit / ytd_revenue * 100 if ytd_revenue else 0)}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("YTD Net Profit/Loss", fmt_lakhs(ytd_profit),
+                     sub=f"Net Margin: {fmt_pct(ytd_profit / ytd_revenue * 100 if ytd_revenue else 0)}",
+                     color_class=profit_color)
     with cols[2]:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Avg Monthly Revenue</div>
-            <div class="metric-value">{fmt_lakhs(avg_monthly_rev)}</div>
-            <div class="metric-sub">GP Margin: {fmt_pct(avg_gp_margin)}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("Avg Monthly Revenue", fmt_lakhs(avg_monthly_rev),
+                     sub=f"GP Margin: {fmt_pct(avg_gp_margin)}")
     with cols[3]:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Best / Worst Month (Rev)</div>
-            <div class="metric-value" style="font-size:1.1rem">{month_labels[best_month_idx]} / {month_labels[worst_month_idx]}</div>
-            <div class="metric-sub">{fmt_lakhs(rev_list[best_month_idx])} / {fmt_lakhs(rev_list[worst_month_idx])}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("Best / Worst Month (Rev)",
+                     f"{month_labels[best_month_idx]} / {month_labels[worst_month_idx]}",
+                     sub=f"{fmt_lakhs(rev_list[best_month_idx])} / {fmt_lakhs(rev_list[worst_month_idx])}")
     with cols[4]:
         runway_text = f"{cash_runway:.1f} mo" if cash_runway < 100 else "Profitable"
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Cash Runway</div>
-            <div class="metric-value">{runway_text}</div>
-            <div class="metric-sub">Cash Bal: {fmt_lakhs(cash_balance)}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
+        metric_card("Cash Runway", runway_text, sub=f"Cash Bal: {fmt_lakhs(cash_balance)}")
 
     # ── MONTHLY P&L STATEMENT ────────────────────────────────────────────────
-    st.markdown('<div class="section-header">MONTHLY PROFIT & LOSS STATEMENT</div>', unsafe_allow_html=True)
+    section_header("MONTHLY PROFIT & LOSS STATEMENT")
     st.caption("Click any amount to drill into underlying transactions")
 
     # Build the P&L table as HTML for full control
@@ -1015,15 +918,15 @@ def main():
         return None
 
     # Build HTML table
-    html = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:0.82rem;font-family:monospace;">'
+    html = '<div style="overflow-x:auto;"><table class="slv-table" style="font-family:\'JetBrains Mono\',monospace;">'
 
     # Header row
-    html += '<tr style="background:#1e293b;color:#f8fafc;position:sticky;top:0;">'
-    html += '<th style="text-align:left;padding:10px 12px;min-width:200px;border:1px solid #334155;">Particulars</th>'
+    html += '<tr>'
+    html += '<th style="text-align:left;min-width:200px;">Particulars</th>'
     for ml in month_labels:
-        html += f'<th style="text-align:right;padding:10px 8px;min-width:90px;border:1px solid #334155;">{ml}</th>'
-    html += f'<th style="text-align:right;padding:10px 8px;min-width:100px;border:1px solid #334155;background:#0f172a;">YTD Total</th>'
-    html += f'<th style="text-align:center;padding:10px 8px;min-width:80px;border:1px solid #334155;background:#0f172a;">Trend</th>'
+        html += f'<th style="min-width:90px;">{ml}</th>'
+    html += f'<th style="min-width:100px;">YTD Total</th>'
+    html += f'<th style="text-align:center;min-width:80px;">Trend</th>'
     html += '</tr>'
 
     for row_key in pnl_rows_order:
@@ -1096,7 +999,7 @@ def main():
 
     # ── DRILL BUTTONS FOR P&L (below the table) ──────────────────────────────
     st.markdown("")
-    with st.expander("🔍 **Drill into P&L Line Items** — Select a line and month to see transactions", expanded=False):
+    with st.expander("**Drill into P&L Line Items** -- Select a line and month to see transactions", expanded=False):
         drill_col1, drill_col2 = st.columns([1, 1])
 
         with drill_col1:
@@ -1125,7 +1028,7 @@ def main():
             selected_month_idx = st.selectbox("Select Month:", month_options,
                                               format_func=lambda i: month_labels[i], key="pnl_drill_month")
 
-        if st.button("📊 View Transactions", key="pnl_drill_go", type="primary"):
+        if st.button("View Transactions", key="pnl_drill_go", type="primary"):
             go_drill(line_keys[selected_line_idx], months[selected_month_idx])
             st.rerun()
 
@@ -1151,7 +1054,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── KEY RATIOS & METRICS ─────────────────────────────────────────────────
-    st.markdown('<div class="section-header">KEY STARTUP / DISTRIBUTION RATIOS</div>', unsafe_allow_html=True)
+    section_header("KEY STARTUP / DISTRIBUTION RATIOS")
 
     col1, col2 = st.columns(2)
 
@@ -1188,7 +1091,7 @@ def main():
         st.dataframe(df_ratios, hide_index=True, use_container_width=True)
 
         # Drill buttons for ratios
-        with st.expander("🔍 **Drill into Ratio Calculation**", expanded=False):
+        with st.expander("**Drill into Ratio Calculation**", expanded=False):
             ratio_names = ["Gross Margin", "Op. Margin", "Net Margin", "MoM Growth", "Rev/Invoice", "Collection %"]
             r_col1, r_col2 = st.columns(2)
             with r_col1:
@@ -1196,7 +1099,7 @@ def main():
             with r_col2:
                 sel_ratio_month = st.selectbox("Select Month:", range(len(months)),
                                                format_func=lambda i: month_labels[i], key="ratio_drill_month")
-            if st.button("📊 Show Calculation", key="ratio_drill_go", type="primary"):
+            if st.button("Show Calculation", key="ratio_drill_go", type="primary"):
                 go_drill(f"ratio:{sel_ratio}", months[sel_ratio_month])
                 st.rerun()
 
@@ -1207,8 +1110,8 @@ def main():
         top5_total = sum(c[1] for c in data["top5_customers"])
         conc_pct = (top5_total / total_sales_val * 100) if total_sales_val > 0 else 0
 
-        conc_html = '<table style="width:100%;font-size:0.82rem;border-collapse:collapse;">'
-        conc_html += '<tr style="background:#1e293b;color:#f8fafc;"><th style="padding:6px 10px;text-align:left;">Customer</th><th style="padding:6px 10px;text-align:right;">Revenue</th><th style="padding:6px 10px;text-align:right;">% Share</th></tr>'
+        conc_html = '<table class="slv-table">'
+        conc_html += '<tr><th style="text-align:left;">Customer</th><th>Revenue</th><th>% Share</th></tr>'
         for cust, amt in data["top5_customers"]:
             share = amt / total_sales_val * 100 if total_sales_val > 0 else 0
             short_name = cust[:30] + "..." if len(cust) > 30 else cust
@@ -1225,7 +1128,7 @@ def main():
         for idx_c, (cust, amt) in enumerate(data["top5_customers"]):
             short = cust[:18] + ".." if len(cust) > 18 else cust
             with cust_cols[idx_c]:
-                if st.button(f"📋 {short}", key=f"cust_drill_{idx_c}"):
+                if st.button(f"{short}", key=f"cust_drill_{idx_c}"):
                     go_drill("customer", party=cust)
                     st.rerun()
 
@@ -1256,14 +1159,14 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── CONTRIBUTION MARGIN ANALYSIS ─────────────────────────────────────────
-    st.markdown('<div class="section-header">CONTRIBUTION MARGIN ANALYSIS</div>', unsafe_allow_html=True)
+    section_header("CONTRIBUTION MARGIN ANALYSIS")
 
-    cm_html = '<table style="width:100%;font-size:0.82rem;border-collapse:collapse;font-family:monospace;">'
-    cm_html += '<tr style="background:#1e293b;color:#f8fafc;">'
-    cm_html += '<th style="padding:8px 12px;text-align:left;">Metric</th>'
+    cm_html = '<table class="slv-table" style="font-family:\'JetBrains Mono\',monospace;">'
+    cm_html += '<tr>'
+    cm_html += '<th style="text-align:left;">Metric</th>'
     for ml in month_labels:
-        cm_html += f'<th style="padding:8px 6px;text-align:right;min-width:85px;">{ml}</th>'
-    cm_html += '<th style="padding:8px 8px;text-align:right;background:#0f172a;">YTD</th></tr>'
+        cm_html += f'<th style="min-width:85px;">{ml}</th>'
+    cm_html += '<th>YTD</th></tr>'
 
     # Revenue
     cm_html += '<tr style="background:#ffffff;"><td style="padding:5px 12px;font-weight:600;">Revenue</td>'
@@ -1318,7 +1221,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── TREND ANALYSIS ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">MoM TREND ANALYSIS</div>', unsafe_allow_html=True)
+    section_header("MoM TREND ANALYSIS")
 
     trend_metrics = {
         "Revenue": pnl["Revenue (Net Sales)"],
@@ -1327,11 +1230,11 @@ def main():
         "Receipts (Collections)": [data["receipts"].get(m, 0) for m in months],
     }
 
-    trend_html = '<table style="width:100%;font-size:0.82rem;border-collapse:collapse;font-family:monospace;">'
-    trend_html += '<tr style="background:#1e293b;color:#f8fafc;">'
-    trend_html += '<th style="padding:8px 12px;text-align:left;">Metric</th>'
+    trend_html = '<table class="slv-table" style="font-family:\'JetBrains Mono\',monospace;">'
+    trend_html += '<tr>'
+    trend_html += '<th style="text-align:left;">Metric</th>'
     for ml in month_labels:
-        trend_html += f'<th style="padding:8px 6px;text-align:right;">{ml}</th>'
+        trend_html += f'<th>{ml}</th>'
     trend_html += '</tr>'
 
     for metric_name, values in trend_metrics.items():
@@ -1370,7 +1273,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── BURN RATE & RUNWAY ───────────────────────────────────────────────────
-    st.markdown('<div class="section-header">BURN RATE & CASH POSITION</div>', unsafe_allow_html=True)
+    section_header("BURN RATE & CASH POSITION")
 
     col_a, col_b, col_c = st.columns(3)
 
@@ -1440,20 +1343,11 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── FOOTER ───────────────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div style="background:#f1f5f9;border-radius:8px;padding:1rem;margin-top:1rem;">
-        <div style="font-size:0.75rem;color:#64748b;text-align:center;">
-            {_mis_company} — Monthly MIS Dashboard &nbsp;|&nbsp; Data: Tally ERP &nbsp;|&nbsp;
-            All amounts in Indian Rupees (Lakhs/Crores) &nbsp;|&nbsp; Generated from live accounting data
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    footer(_mis_company)
 
 
 # ── PERSISTENT CHAT BAR ─────────────────────────────────────────────────────
 st.markdown("---")
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from chat_engine import ask, format_result_as_text
 
 chat_input = st.chat_input("Ask anything — P&L, Balance Sheet, ledger of [party], debtors, creditors...")

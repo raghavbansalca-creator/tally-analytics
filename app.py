@@ -20,85 +20,11 @@ from tally_reports import (
 )
 from sidebar_filters import render_sidebar_filters
 
-st.set_page_config(page_title="Seven Labs Vision", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Seven Labs Vision", page_icon="", layout="wide")
 
 # ── STYLES ───────────────────────────────────────────────────────────────────
-
-st.markdown("""
-<style>
-    /* Remove default padding */
-    .block-container { padding-top: 1rem; }
-
-    /* Clickable group cards */
-    .group-card {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 12px 16px;
-        margin: 4px 0;
-        border-left: 4px solid #2E75B6;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-    .group-card:hover { background: #e9ecef; transform: translateX(4px); }
-    .group-card-income { border-left-color: #28a745; }
-    .group-card-expense { border-left-color: #dc3545; }
-    .group-card-asset { border-left-color: #007bff; }
-    .group-card-liability { border-left-color: #6f42c1; }
-
-    /* Amount styling */
-    .amount { font-family: 'Courier New', monospace; font-weight: 600; }
-    .amount-positive { color: #28a745; }
-    .amount-negative { color: #dc3545; }
-
-    /* Breadcrumb */
-    .breadcrumb {
-        font-size: 0.85rem;
-        color: #666;
-        margin-bottom: 1rem;
-        padding: 8px 12px;
-        background: #f0f2f6;
-        border-radius: 6px;
-    }
-    .breadcrumb a { color: #2E75B6; text-decoration: none; cursor: pointer; }
-
-    /* Header */
-    .report-title {
-        font-size: 1.6rem;
-        font-weight: 700;
-        margin-bottom: 0.3rem;
-    }
-    .company-name { color: #666; font-size: 1rem; margin-bottom: 1.5rem; }
-
-    /* Totals bar */
-    .totals-bar {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        color: white;
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 1.5rem;
-    }
-    .totals-bar h3 { margin: 0; font-size: 0.85rem; opacity: 0.7; text-transform: uppercase; }
-    .totals-bar .big-number { font-size: 1.8rem; font-weight: 700; margin: 4px 0; }
-
-    /* Button styling for clickable rows */
-    div.stButton > button {
-        width: 100%;
-        text-align: left;
-        background: white;
-        border: 1px solid #e0e0e0;
-        border-radius: 6px;
-        padding: 8px 16px;
-        margin: 2px 0;
-        transition: all 0.15s;
-        font-size: 0.9rem;
-    }
-    div.stButton > button:hover {
-        background: #f0f7ff;
-        border-color: #2E75B6;
-        transform: translateX(4px);
-    }
-</style>
-""", unsafe_allow_html=True)
+from styles import inject_base_styles, fmt as sfmt, page_header, section_header, metric_card, sidebar_company_card, sidebar_section_label
+inject_base_styles()
 
 
 # ── STATE MANAGEMENT ─────────────────────────────────────────────────────────
@@ -167,11 +93,40 @@ company_row = conn.execute("SELECT value FROM _metadata WHERE key='company_name'
 company_name = company_row[0] if company_row else "Unknown"
 
 with st.sidebar:
-    st.markdown(f"### Seven Labs Vision")
-    st.markdown(f"**{company_name}**")
+    st.markdown("#### Seven Labs Vision")
+
+    # Company card with profile info
+    _profile_info = {"entity_type": "", "business_nature": "", "complexity": ""}
+    try:
+        _profile_rows = conn.execute("SELECT key, value FROM _company_profile").fetchall()
+        for k, v in _profile_rows:
+            if k in _profile_info:
+                _profile_info[k] = v
+    except Exception:
+        pass
+    sidebar_company_card(
+        company_name,
+        entity_type=_profile_info["entity_type"],
+        business_nature=_profile_info["business_nature"],
+        complexity=_profile_info["complexity"],
+    )
+
+    # ── NAVIGATION ──
+    sidebar_section_label("REPORTS")
+    if st.button("Dashboard", use_container_width=True, key="nav_home"):
+        go_home()
+    if st.button("Profit & Loss", use_container_width=True, key="nav_pl"):
+        go_report("pl")
+    if st.button("Balance Sheet", use_container_width=True, key="nav_bs"):
+        go_report("bs")
+    if st.button("Debtors Outstanding", use_container_width=True, key="nav_debtors"):
+        go_report("debtors")
+    if st.button("Creditors Outstanding", use_container_width=True, key="nav_creditors"):
+        go_report("creditors")
+
     st.markdown("---")
 
-    # ── GLOBAL DATE FILTER ──
+    # ── DATE FILTER ──
     _min_date_row = conn.execute("SELECT MIN(DATE) FROM trn_voucher").fetchone()
     _max_date_row = conn.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
     _min_dt = datetime.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else datetime.date(2025, 4, 1)
@@ -180,49 +135,35 @@ with st.sidebar:
         st.session_state.global_start_date = _min_dt
     if "global_end_date" not in st.session_state:
         st.session_state.global_end_date = _max_dt
-    st.markdown("### Date Range")
-    _from = st.date_input("From", value=st.session_state.global_start_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_from")
-    _to = st.date_input("To", value=st.session_state.global_end_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_to")
-    st.session_state.global_start_date = _from
-    st.session_state.global_end_date = _to
-    DATE_FROM = _from.strftime("%Y%m%d")
-    DATE_TO = _to.strftime("%Y%m%d")
-    st.caption(f"Showing: {_from.strftime('%d %b %Y')} to {_to.strftime('%d %b %Y')}")
-    if st.button("Reset to Full Period", key="app_reset_dates"):
-        st.session_state.global_start_date = _min_dt
-        st.session_state.global_end_date = _max_dt
-        st.rerun()
-    st.markdown("---")
 
-    if st.button("🏠 Home", use_container_width=True):
-        go_home()
-    if st.button("📋 Profit & Loss", use_container_width=True):
-        go_report("pl")
-    if st.button("📊 Balance Sheet", use_container_width=True):
-        go_report("bs")
-    if st.button("👥 Debtors Outstanding", use_container_width=True):
-        go_report("debtors")
-    if st.button("🏢 Creditors Outstanding", use_container_width=True):
-        go_report("creditors")
+    with st.expander(f"Date: {st.session_state.global_start_date.strftime('%d %b %Y')} - {st.session_state.global_end_date.strftime('%d %b %Y')}", expanded=False):
+        _from = st.date_input("From", value=st.session_state.global_start_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_from")
+        _to = st.date_input("To", value=st.session_state.global_end_date, min_value=_min_dt, max_value=_max_dt, key="app_filter_to")
+        st.session_state.global_start_date = _from
+        st.session_state.global_end_date = _to
+        if st.button("Reset to Full Period", key="app_reset_dates"):
+            st.session_state.global_start_date = _min_dt
+            st.session_state.global_end_date = _max_dt
+            st.rerun()
 
-    st.markdown("---")
-    st.markdown("**Search Ledger**")
-    search_q = st.text_input("", placeholder="Type party name...")
-    if search_q:
-        results = search_ledger(conn, search_q)
-        for name, parent, bal in results[:8]:
-            if st.button(f"{name} ({parent})", key=f"search_{name}"):
-                go_report("pl")  # set report context
-                go_ledger(name)
+    DATE_FROM = st.session_state.global_start_date.strftime("%Y%m%d")
+    DATE_TO = st.session_state.global_end_date.strftime("%Y%m%d")
 
-    st.markdown("---")
-    stats = {
-        "Ledgers": conn.execute("SELECT COUNT(*) FROM mst_ledger").fetchone()[0],
-        "Vouchers": conn.execute("SELECT COUNT(*) FROM trn_voucher").fetchone()[0],
-        "Entries": conn.execute("SELECT COUNT(*) FROM trn_accounting").fetchone()[0],
-    }
-    for label, val in stats.items():
-        st.caption(f"{label}: {val:,}")
+    # ── SEARCH ──
+    with st.expander("Search Ledger", expanded=False):
+        search_q = st.text_input("Search", placeholder="Type party name...", label_visibility="collapsed", key="app_search")
+        if search_q:
+            results = search_ledger(conn, search_q)
+            for name, parent, bal in results[:8]:
+                if st.button(f"{name} ({parent})", key=f"search_{name}"):
+                    go_report("pl")
+                    go_ledger(name)
+
+    # ── STATS ──
+    _ledger_count = conn.execute("SELECT COUNT(*) FROM mst_ledger").fetchone()[0]
+    _voucher_count = conn.execute("SELECT COUNT(*) FROM trn_voucher").fetchone()[0]
+    _entry_count = conn.execute("SELECT COUNT(*) FROM trn_accounting").fetchone()[0]
+    st.caption(f"{_ledger_count:,} ledgers  |  {_voucher_count:,} vouchers  |  {_entry_count:,} entries")
 
 # ── DYNAMIC SIDEBAR FILTERS (voucher type, cost centre, group, godown) ──────
 _filters = render_sidebar_filters(conn, page_key="app")

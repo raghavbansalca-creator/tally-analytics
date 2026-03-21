@@ -11,151 +11,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tally_data.db")
 
-st.set_page_config(page_title="Company Profile", page_icon="\U0001f3e2", layout="wide")
+st.set_page_config(page_title="Company Profile", page_icon="", layout="wide")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from styles import inject_base_styles, page_header, section_header, metric_card, fmt, fmt_full, badge, footer, empty_state, info_banner
+inject_base_styles()
 
 
-# ── STYLING ──────────────────────────────────────────────────────────────────
-
-CARD_CSS = """
-<style>
-.profile-card {
-    border: 2px solid #e0e0e0;
-    border-radius: 12px;
-    padding: 20px 16px;
-    text-align: center;
-    min-height: 140px;
-    background: #fafafa;
-    margin-bottom: 8px;
-}
-.profile-card .card-icon {
-    font-size: 28px;
-    margin-bottom: 6px;
-}
-.profile-card .card-label {
-    color: #888;
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 4px;
-}
-.profile-card .card-value {
-    font-size: 22px;
-    font-weight: 700;
-    margin-bottom: 0;
-}
-.card-border-blue { border-left: 5px solid #2196F3; }
-.card-border-green { border-left: 5px solid #4CAF50; }
-.card-border-orange { border-left: 5px solid #FF9800; }
-.card-border-purple { border-left: 5px solid #9C27B0; }
-
-.detail-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 8px 24px;
-}
-.detail-item {
-    padding: 6px 0;
-}
-.detail-item .detail-label {
-    color: #888;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-.detail-item .detail-value {
-    font-size: 15px;
-    font-weight: 600;
-}
-
-.feature-item {
-    padding: 4px 8px;
-    margin: 3px 0;
-    border-radius: 6px;
-    background: #e8f5e9;
-    display: inline-block;
-    font-size: 14px;
-}
-.feature-check {
-    color: #4CAF50;
-    font-weight: bold;
-    margin-right: 6px;
-}
-
-.priority-high {
-    background: #ffebee;
-    color: #c62828;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 600;
-}
-.priority-medium {
-    background: #fff3e0;
-    color: #e65100;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 600;
-}
-.priority-low {
-    background: #e8f5e9;
-    color: #2e7d32;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 600;
-}
-
-.confidence-bar-container {
-    display: flex;
-    align-items: center;
-    margin: 4px 0;
-}
-.confidence-label {
-    width: 140px;
-    font-size: 13px;
-    text-align: right;
-    padding-right: 10px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.confidence-bar {
-    height: 20px;
-    border-radius: 4px;
-    min-width: 4px;
-}
-.confidence-score {
-    font-size: 12px;
-    padding-left: 6px;
-    color: #666;
-    min-width: 30px;
-}
-
-.stat-box {
-    text-align: center;
-    padding: 10px;
-    border: 1px solid #eee;
-    border-radius: 8px;
-    background: #fafafa;
-}
-.stat-box .stat-num {
-    font-size: 20px;
-    font-weight: 700;
-    color: #333;
-}
-.stat-box .stat-label {
-    font-size: 11px;
-    color: #999;
-    text-transform: uppercase;
-}
-</style>
-"""
-
-st.markdown(CARD_CSS, unsafe_allow_html=True)
-
-
-# ── HELPERS ──────────────────────────────────────────────────────────────────
+# -- HELPERS ------------------------------------------------------------------
 
 def safe_get(d, key, default=""):
     if d is None:
@@ -186,10 +49,10 @@ def render_confidence_bars(scores, color="#2196F3"):
         width_pct = int((score / max(max_score, 1)) * 100)
         width_pct = max(width_pct, 5)
         html_parts.append(
-            f'<div class="confidence-bar-container">'
-            f'<div class="confidence-label">{label}</div>'
-            f'<div class="confidence-bar" style="width:{width_pct}%;background:{color};"></div>'
-            f'<div class="confidence-score">{score}</div>'
+            f'<div style="display:flex;align-items:center;margin:4px 0;">'
+            f'<div style="width:140px;font-size:13px;text-align:right;padding-right:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{label}</div>'
+            f'<div style="height:20px;border-radius:4px;min-width:4px;width:{width_pct}%;background:{color};"></div>'
+            f'<div style="font-size:12px;padding-left:6px;color:#666;min-width:30px;">{score}</div>'
             f'</div>'
         )
     st.markdown("".join(html_parts), unsafe_allow_html=True)
@@ -214,7 +77,7 @@ def render_signal_list(signals_dict, keys_to_show):
                 st.markdown(f"**{display_key}:** {val}")
 
 
-# ── LOAD PROFILE ─────────────────────────────────────────────────────────────
+# -- LOAD PROFILE -------------------------------------------------------------
 
 def load_existing_profile():
     """Load profile from database, return None if not available."""
@@ -235,7 +98,7 @@ def run_profiler():
         return None
 
 
-# ── MAIN PAGE ────────────────────────────────────────────────────────────────
+# -- MAIN PAGE ----------------------------------------------------------------
 
 profile = load_existing_profile()
 
@@ -249,20 +112,18 @@ if st.sidebar.button("Re-Profile Company", key="btn_reprofile", type="primary"):
         st.rerun()
 
 if profile is None:
-    st.markdown("## Company Intelligence Profile")
+    page_header("Company Intelligence Profile", "Analyze your Tally data to detect entity type, business nature, and industry")
     st.info("No company profile found. Click **Re-Profile Company** in the sidebar to analyze the loaded Tally data.")
     st.stop()
 
 
-# ── HEADER ───────────────────────────────────────────────────────────────────
+# -- HEADER -------------------------------------------------------------------
 
 company_name = safe_get(profile, "company_name", "Company")
-st.markdown(f"## Company Intelligence Profile")
-st.markdown(f"### {company_name}")
-st.markdown("---")
+page_header("Company Intelligence Profile", company_name)
 
 
-# ── PROFILE CARDS ROW ────────────────────────────────────────────────────────
+# -- PROFILE CARDS ROW -------------------------------------------------------
 
 c1, c2, c3, c4 = st.columns(4)
 
@@ -273,52 +134,24 @@ complexity = safe_get(profile, "complexity", "Unknown")
 complexity_score = int(safe_get(profile, "complexity_score", 0))
 
 with c1:
-    st.markdown(
-        f'<div class="profile-card card-border-blue">'
-        f'<div class="card-icon">[E]</div>'
-        f'<div class="card-label">Entity Type</div>'
-        f'<div class="card-value">{entity_type}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    metric_card("Entity Type", entity_type, color_class="blue")
 
 with c2:
-    st.markdown(
-        f'<div class="profile-card card-border-green">'
-        f'<div class="card-icon">[B]</div>'
-        f'<div class="card-label">Business Nature</div>'
-        f'<div class="card-value">{business_nature}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    metric_card("Business Nature", business_nature, color_class="green")
 
 with c3:
-    st.markdown(
-        f'<div class="profile-card card-border-orange">'
-        f'<div class="card-icon">[I]</div>'
-        f'<div class="card-label">Industry</div>'
-        f'<div class="card-value">{industry}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    metric_card("Industry", industry, color_class="amber")
 
 with c4:
-    st.markdown(
-        f'<div class="profile-card card-border-purple">'
-        f'<div class="card-icon">[C]</div>'
-        f'<div class="card-label">Complexity</div>'
-        f'<div class="card-value">{complexity} {complexity_score}/10</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    metric_card("Complexity", f"{complexity} {complexity_score}/10", color_class="purple")
     st.progress(complexity_score / 10)
 
 st.markdown("")
 
 
-# ── COMPANY DETAILS ──────────────────────────────────────────────────────────
+# -- COMPANY DETAILS ----------------------------------------------------------
 
-st.markdown("### Company Details")
+section_header("Company Details")
 
 d1, d2, d3 = st.columns(3)
 
@@ -338,7 +171,7 @@ with d3:
 # Data volume stats
 stats = safe_get(profile, "stats", {})
 if stats:
-    st.markdown("#### Data Volume")
+    section_header("Data Volume")
     stat_cols = st.columns(7)
     stat_labels = [
         ("mst_group", "Groups"),
@@ -352,33 +185,21 @@ if stats:
     for i, (key, label) in enumerate(stat_labels):
         with stat_cols[i]:
             val = stats.get(key, 0)
-            st.markdown(
-                f'<div class="stat-box">'
-                f'<div class="stat-num">{fmt_number(val)}</div>'
-                f'<div class="stat-label">{label}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            metric_card(label, fmt_number(val))
 
 st.markdown("---")
 
 
-# ── COMPLEXITY FEATURES ──────────────────────────────────────────────────────
+# -- COMPLEXITY FEATURES ------------------------------------------------------
 
-st.markdown("### Complexity Features")
+section_header("Complexity Features")
 features = safe_get(profile, "features", {})
 if features:
     cols = st.columns(3)
     feature_list = list(features.items())
     for i, (key, desc) in enumerate(feature_list):
         with cols[i % 3]:
-            st.markdown(
-                f'<div class="feature-item">'
-                f'<span class="feature-check">&#10003;</span>'
-                f'{desc}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f"* {desc}")
     st.markdown("")
 else:
     st.caption("No complexity features detected.")
@@ -386,9 +207,9 @@ else:
 st.markdown("---")
 
 
-# ── DETECTION CONFIDENCE ─────────────────────────────────────────────────────
+# -- DETECTION CONFIDENCE -----------------------------------------------------
 
-st.markdown("### Detection Confidence")
+section_header("Detection Confidence")
 
 signals = safe_get(profile, "signals", {})
 
@@ -415,9 +236,9 @@ with conf3:
 st.markdown("---")
 
 
-# ── DETECTION SIGNALS ────────────────────────────────────────────────────────
+# -- DETECTION SIGNALS --------------------------------------------------------
 
-st.markdown("### Detection Signals")
+section_header("Detection Signals")
 
 with st.expander("Entity Type Signals"):
     es = signals.get("entity_type", {})
@@ -478,9 +299,9 @@ with st.expander("Industry Signals"):
 st.markdown("---")
 
 
-# ── RECOMMENDED ANALYSES ─────────────────────────────────────────────────────
+# -- RECOMMENDED ANALYSES -----------------------------------------------------
 
-st.markdown("### Recommended Analyses")
+section_header("Recommended Analyses")
 
 recommendations = safe_get(profile, "recommendations", [])
 if recommendations:
@@ -502,42 +323,26 @@ if recommendations:
         recs = categories[cat]
         st.markdown(f"#### {cat}")
 
-        table_html = '<table style="width:100%;border-collapse:collapse;margin-bottom:16px;">'
-        table_html += (
-            '<tr style="background:#f5f5f5;border-bottom:2px solid #ddd;">'
-            '<th style="text-align:left;padding:8px;">Name</th>'
-            '<th style="text-align:left;padding:8px;">Description</th>'
-            '<th style="text-align:center;padding:8px;width:90px;">Priority</th>'
-            '</tr>'
-        )
         for rec in recs:
             name = rec.get("name", "")
             desc = rec.get("description", "")
             priority = rec.get("priority", "Medium")
             p_lower = priority.lower()
             if p_lower == "high":
-                badge = '<span class="priority-high">HIGH</span>'
-            elif p_lower == "medium" or p_lower == "med":
-                badge = '<span class="priority-medium">MED</span>'
+                badge_html = badge("HIGH", "red")
+            elif p_lower in ("medium", "med"):
+                badge_html = badge("MED", "amber")
             else:
-                badge = '<span class="priority-low">LOW</span>'
+                badge_html = badge("LOW", "green")
 
-            table_html += (
-                f'<tr style="border-bottom:1px solid #eee;">'
-                f'<td style="padding:8px;font-weight:600;">{name}</td>'
-                f'<td style="padding:8px;color:#555;">{desc}</td>'
-                f'<td style="padding:8px;text-align:center;">{badge}</td>'
-                f'</tr>'
-            )
-        table_html += '</table>'
-        st.markdown(table_html, unsafe_allow_html=True)
+            st.markdown(f"**{name}** {badge_html} -- {desc}", unsafe_allow_html=True)
 else:
     st.caption("No recommendations available. Run the profiler first.")
 
 st.markdown("---")
 
 
-# ── RE-PROFILE BUTTON (MAIN AREA) ───────────────────────────────────────────
+# -- RE-PROFILE BUTTON (MAIN AREA) -------------------------------------------
 
 st.markdown("")
 bc1, bc2, bc3 = st.columns([1, 1, 1])
@@ -550,7 +355,9 @@ with bc2:
             st.rerun()
 
 
-# ── PERSISTENT CHAT BAR ─────────────────────────────────────────────────────
+# -- FOOTER & PERSISTENT CHAT BAR --------------------------------------------
+
+footer()
 
 try:
     from chat_engine import ask, format_result_as_text

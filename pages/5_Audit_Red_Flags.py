@@ -11,7 +11,11 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from audit_engine import run_all_checks
 
-st.set_page_config(page_title="Audit Red Flags", page_icon="\U0001f50d", layout="wide")
+st.set_page_config(page_title="Audit Red Flags", page_icon="", layout="wide")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from styles import inject_base_styles, page_header, section_header, metric_card, fmt, fmt_full, badge, footer, empty_state, info_banner
+inject_base_styles()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tally_data.db")
 
@@ -38,8 +42,32 @@ def fmt_inr(amount):
         return f"{sign}Rs {abs_amt:.2f}"
 
 
+def status_badge_html(status):
+    """Return badge() HTML for status."""
+    s = (status or "").lower()
+    if s == "pass":
+        return badge("PASS", "green")
+    elif s == "fail":
+        return badge("FAIL", "red")
+    elif s in ("skipped", "error"):
+        return badge("SKIP", "gray")
+    return badge(status or "N/A", "gray")
+
+
+def severity_badge_html(severity):
+    """Return badge() HTML for severity."""
+    s = (severity or "").lower()
+    if s == "high":
+        return badge("HIGH", "red")
+    elif s == "medium":
+        return badge("MED", "amber")
+    elif s == "low":
+        return badge("LOW", "green")
+    return badge(severity or "N/A", "gray")
+
+
 def status_badge(status):
-    """Return colored text for status."""
+    """Return colored text for status (for expander headers that don't support HTML)."""
     s = (status or "").lower()
     if s == "pass":
         return ":green[PASS]"
@@ -51,7 +79,7 @@ def status_badge(status):
 
 
 def severity_badge(severity):
-    """Return colored text for severity."""
+    """Return colored text for severity (for expander headers)."""
     s = (severity or "").lower()
     if s == "high":
         return ":red[High]"
@@ -89,8 +117,7 @@ except Exception:
 
 # -- Header -------------------------------------------------------------------
 
-st.title("Audit Red Flags")
-st.caption(COMPANY)
+page_header("Audit Red Flags", COMPANY)
 
 
 # -- Run Audit ----------------------------------------------------------------
@@ -153,10 +180,14 @@ with gc1:
 with gc2:
     st.markdown("")  # spacer
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Checks", summary.get("total_checks", 0))
-    m2.metric("Flags Found", summary.get("total_flags", 0))
-    m3.metric("High Severity", summary.get("high_severity_checks", 0))
-    m4.metric("Medium Severity", summary.get("medium_severity_checks", 0))
+    with m1:
+        metric_card("Total Checks", summary.get("total_checks", 0), color_class="blue")
+    with m2:
+        metric_card("Flags Found", summary.get("total_flags", 0), color_class="amber")
+    with m3:
+        metric_card("High Severity", summary.get("high_severity_checks", 0), color_class="red")
+    with m4:
+        metric_card("Medium Severity", summary.get("medium_severity_checks", 0), color_class="amber")
 
 st.markdown("---")
 
@@ -191,6 +222,11 @@ for key in CHECK_KEYS:
     header_text = f"{check_name}  --  {status_badge(status)}  |  Severity: {severity_badge(severity)}  |  Flags: {flag_count}"
 
     with st.expander(header_text, expanded=(status == "fail")):
+        # Show badges using the design system
+        st.markdown(
+            f"{status_badge_html(status)} {severity_badge_html(severity)} Flags: **{flag_count}**",
+            unsafe_allow_html=True,
+        )
         st.markdown(description)
 
         if status in ("skipped", "error"):
@@ -390,9 +426,10 @@ for key in CHECK_KEYS:
                 st.caption(f"Threshold: {fmt_inr(threshold)} (mean {fmt_inr(mean_val)} + 3 x std dev {fmt_inr(std_val)})")
 
 
-# -- Persistent Chat Bar ------------------------------------------------------
+# -- Footer & Persistent Chat Bar --------------------------------------------
 
-st.markdown("---")
+footer()
+
 from chat_engine import ask, format_result_as_text
 
 chat_input = st.chat_input("Ask anything about audit findings, ledgers, vouchers...")
