@@ -15,9 +15,12 @@ CATEGORIES = [
     {
         "name": "Related Party",
         "patterns": [
-            r"\bdirector\b", r"\bpartner\b", r"\bpromoter\b", r"\brelative\b",
-            r"\bfamily\b", r"\bspouse\b", r"\bson\b", r"\bdaughter\b",
-            r"\bbrother\b", r"\bsister\b", r"\bfather\b", r"\bmother\b",
+            r"\bdirector\b", r"\bpromoter\b", r"\brelative\b",
+            r"\bfamily\b", r"\bspouse\b",
+            # Family members — require context (not standalone product names)
+            r"\b(?:his|her|my|the|to|of|for)\s+(?:son|daughter|brother|sister|father|mother)\b",
+            r"\bdirector'?s?\s+(?:wife|husband|son|daughter|brother|sister|relative)\b",
+            r"\bpartner'?s?\s+(?:wife|husband|capital|drawing|current|loan)\b",
         ],
         "comment": "Possible related party transaction - verify arm's length pricing",
         "severity": "HIGH",
@@ -25,8 +28,10 @@ CATEGORIES = [
     {
         "name": "Cash Transactions",
         "patterns": [
-            r"\bcash\b", r"\bcash payment\b", r"\bcash receipt\b",
-            r"\bcash deposit\b", r"\bcash withdrawal\b",
+            r"\bcash\s+(?:payment|receipt|deposit|withdrawal|paid|received|purchase)\b",
+            r"\b(?:paid|received|deposited|withdrawn)\s+(?:in\s+)?cash\b",
+            r"\bcash\s+(?:a/?c|account)\b",
+            r"(?:^|\s)cash(?:\s|$)",  # standalone "cash" but not inside words
         ],
         "comment": "Cash transaction - verify Sec 269ST/269SS compliance",
         "severity": "MEDIUM",
@@ -34,8 +39,12 @@ CATEGORIES = [
     {
         "name": "Loan/Advance",
         "patterns": [
-            r"\bloan\b", r"\badvance\b", r"\blent\b", r"\bborrowed\b",
-            r"\bemi\b", r"\brepayment\b", r"\binterest\b",
+            r"\bloan\b", r"\blent\b", r"\bborrowed\b",
+            r"\bemi\b", r"\brepayment\b",
+            # "advance" — exclude "advance tax" which is different
+            r"\badvance\s+(?:to|from|given|received|paid|against)\b",
+            r"\b(?:staff|employee|salary|personal)\s+advance\b",
+            r"\binterest\s+(?:on|paid|received|charged)\b",
         ],
         "comment": "Loan/advance - verify Sec 185/186 compliance, TDS applicability",
         "severity": "MEDIUM",
@@ -45,8 +54,10 @@ CATEGORIES = [
         "patterns": [
             r"\bpurchase of\b", r"\bacquisition\b", r"\bmachinery\b",
             r"\bequipment\b", r"\bvehicle\b", r"\bcomputer\b", r"\blaptop\b",
-            r"\bfurniture\b", r"\bac\b", r"\bair conditioner\b", r"\bbuilding\b",
+            r"\bfurniture\b", r"\bair\s*conditioner\b", r"\bbuilding\b",
+            r"\bfixed\s+asset\b", r"\bcapital\s+(?:asset|goods|item)\b",
         ],
+        # BUG 5 FIX: Removed \bac\b (too short, matches "account")
         "comment": "Capital expenditure - verify capitalization vs revenue treatment",
         "severity": "MEDIUM",
     },
@@ -54,8 +65,10 @@ CATEGORIES = [
         "name": "Salary/Wages",
         "patterns": [
             r"\bsalary\b", r"\bwages\b", r"\bbonus\b", r"\bincentive\b",
-            r"\bcommission\b", r"\bgratuity\b", r"\bleave encashment\b",
+            r"\bgratuity\b", r"\bleave encashment\b",
             r"\bpf\b", r"\besi\b", r"\bprofessional tax\b",
+            r"\bstipend\b", r"\bhonorarium\b",
+            # "commission" removed — too generic (sales commission vs employee commission)
         ],
         "comment": "Employee payment - verify TDS u/s 192, PF/ESI compliance",
         "severity": "LOW",
@@ -63,8 +76,11 @@ CATEGORIES = [
     {
         "name": "Rent Payments",
         "patterns": [
-            r"\brent\b", r"\blease\b", r"\blicense fee\b",
-            r"\boffice rent\b", r"\bwarehouse rent\b", r"\bgodown rent\b",
+            r"\b(?:office|warehouse|godown|shop|factory|premises|property|building)\s+rent\b",
+            r"\brent\s+(?:paid|payment|for|of)\b",
+            r"\blease\s+(?:rent|payment|amount)\b", r"\blicense fee\b",
+            r"\bmonthly\s+rent\b", r"\brent\s+a/?c\b",
+            # Exclude: "auto rent", "bus rent", "porter rent" (transport costs)
         ],
         "comment": "Rent payment - verify TDS u/s 194I, GST RCM if applicable",
         "severity": "LOW",
@@ -72,8 +88,10 @@ CATEGORIES = [
     {
         "name": "Professional/Consultancy",
         "patterns": [
-            r"\bprofessional\b", r"\bconsultancy\b", r"\blegal\b",
-            r"\baudit fee\b", r"\bca fee\b", r"\bcs fee\b",
+            r"\bprofessional\s+(?:fee|charge|service)\b",
+            r"\bconsultancy\b", r"\bconsulting\b",  # BUG 7 FIX: added consulting
+            r"\blegal\s+(?:fee|charge|service|expense)\b",
+            r"\baudit\s*fee\b", r"\bca\s+fee\b", r"\bcs\s+fee\b",
             r"\badvocate\b", r"\blawyer\b", r"\badvisory\b",
         ],
         "comment": "Professional fee - verify TDS u/s 194J",
@@ -82,7 +100,10 @@ CATEGORIES = [
     {
         "name": "Contractor Payments",
         "patterns": [
-            r"\bcontractor\b", r"\bsub-contractor\b", r"\blabour\b",
+            r"\bcontractor\b", r"\bsub-contractor\b",
+            r"\blabour\s+(?:charge|cost|payment|work|contract)\b",
+            r"\b(?:paid|payment)\s+(?:to|for)\s+labour\b",
+            # BUG 6 FIX: require context for "labour" (not standalone like "Labour Day")
             r"\bworks contract\b", r"\bjob work\b", r"\bfabrication\b",
             r"\bconstruction\b",
         ],
@@ -92,8 +113,10 @@ CATEGORIES = [
     {
         "name": "Insurance",
         "patterns": [
-            r"\binsurance\b", r"\bpremium\b", r"\bpolicy\b",
+            r"insurance", r"\bpremium\b",  # BUG 8 FIX: no word boundary at end for "insurance"
+            r"\binsurance\s+(?:policy|premium|renewal|claim)\b",
             r"\bmediclaim\b", r"\blic\b", r"\bgeneral insurance\b",
+            r"\bhealth\s+insurance\b", r"\bfire\s+insurance\b",
         ],
         "comment": "Insurance - verify prepaid treatment if multi-year",
         "severity": "LOW",
@@ -101,8 +124,10 @@ CATEGORIES = [
     {
         "name": "Provision/Write-off",
         "patterns": [
-            r"\bprovision\b", r"\bwrite off\b", r"\bwritten off\b",
-            r"\bbad debt\b", r"\bdoubtful\b", r"\bnpa\b", r"\bwaiver\b",
+            r"\bprovision\s+(?:for|against|made)\b",
+            r"\bwrite\s*off\b", r"\bwritten\s*off\b",
+            r"\bbad\s+debt\b", r"\bdoubtful\b", r"\bnpa\b", r"\bwaiver\b",
+            # Exclude "provisional" (too generic)
         ],
         "comment": "Provision/write-off - verify board resolution and documentation",
         "severity": "HIGH",
@@ -110,8 +135,10 @@ CATEGORIES = [
     {
         "name": "Inter-company/Branch",
         "patterns": [
-            r"\binter-company\b", r"\bbranch transfer\b", r"\bhead office\b",
-            r"\bho\b", r"\bbranch\b", r"\binter-unit\b",
+            r"\binter[\s-]?company\b", r"\bbranch\s+transfer\b",
+            r"\bhead\s+office\b", r"\binter[\s-]?unit\b",
+            r"\b(?:transfer\s+(?:to|from)\s+)?branch\s+(?:office|unit|location)\b",
+            # BUG 4 FIX: removed standalone \bbranch\b and \bho\b (matches bank ATM branches)
         ],
         "comment": "Inter-company/branch - verify transfer pricing, GST implications",
         "severity": "MEDIUM",
@@ -120,8 +147,9 @@ CATEGORIES = [
         "name": "Reversal/Correction",
         "patterns": [
             r"\breversal\b", r"\breversed\b", r"\bcorrection\b",
-            r"\brectification\b", r"\berror\b", r"\bmistake\b",
-            r"\bwrong entry\b", r"\badjusted\b",
+            r"\brectification\b", r"\bmistake\b",
+            r"\bwrong\s+entry\b", r"\bentry\s+(?:reversed|corrected)\b",
+            # Removed \berror\b (too generic) and \badjusted\b (too generic)
         ],
         "comment": "Reversal/correction entry - verify original entry and authorization",
         "severity": "HIGH",
@@ -129,8 +157,13 @@ CATEGORIES = [
     {
         "name": "Year-end Adjustments",
         "patterns": [
-            r"\bclosing\b", r"\bopening\b", r"\byear end\b", r"\byear-end\b",
-            r"\badjustment\b", r"\baccrual\b", r"\bprepaid\b", r"\boutstanding\b",
+            r"\bclosing\s+(?:entry|entries|balance|stock|adjustment)\b",
+            r"\bopening\s+(?:entry|entries|balance|stock|adjustment)\b",
+            r"\byear[\s-]?end\b",
+            r"\b(?:accrual|accrued)\b",
+            r"\bprepaid\s+(?:expense|rent|insurance|amount)\b",
+            # BUG 3 FIX: removed standalone \bprepaid\b (matches "Amazon Prepaid")
+            r"\boutstanding\s+(?:expense|salary|rent|liability)\b",
         ],
         "comment": "Year-end adjustment - verify cut-off and supporting documentation",
         "severity": "MEDIUM",
@@ -138,9 +171,11 @@ CATEGORIES = [
     {
         "name": "Suspense/Clearing",
         "patterns": [
-            r"\bsuspense\b", r"\bclearing\b", r"\btemporary\b",
-            r"\bpending\b", r"\bto be\b", r"\btba\b",
+            r"\bsuspense\b", r"\bclearing\s+(?:a/?c|account|entry)\b",
+            r"\btemporary\s+(?:a/?c|account|entry|posting)\b",
             r"\bunidentified\b", r"\bunknown\b",
+            # Removed \bpending\b and \bto be\b (too generic)
+            r"\btba\b",
         ],
         "comment": "Suspense/clearing entry - must be cleared before year-end",
         "severity": "HIGH",
@@ -149,7 +184,8 @@ CATEGORIES = [
         "name": "Donation/CSR",
         "patterns": [
             r"\bdonation\b", r"\bcharity\b", r"\bcsr\b",
-            r"\bcontribution\b", r"\bcorpus\b", r"\btrust\b",
+            r"\bcontribution\b", r"\bcorpus\b",
+            # Removed \btrust\b (too generic — many businesses are trusts)
         ],
         "comment": "Donation/CSR - verify Sec 80G eligibility, Sec 135 compliance",
         "severity": "MEDIUM",
@@ -157,8 +193,11 @@ CATEGORIES = [
     {
         "name": "Foreign/Forex",
         "patterns": [
-            r"\bforeign\b", r"\bforex\b", r"\busd\b", r"\beur\b", r"\bgbp\b",
-            r"\bexchange\b", r"\bremittance\b", r"\bswift\b", r"\bwire transfer\b",
+            r"\bforeign\s+(?:currency|exchange|remittance|payment|receipt)\b",
+            r"\bforex\b", r"\busd\b", r"\beur\b", r"\bgbp\b",
+            r"\bremittance\b", r"\bswift\b", r"\bwire\s+transfer\b",
+            r"\bcurrency\s+exchange\b",
+            # BUG 2 FIX: removed standalone \bexchange\b (matches product exchange/return)
         ],
         "comment": "Foreign transaction - verify FEMA compliance, withholding tax",
         "severity": "MEDIUM",
@@ -292,6 +331,16 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
 
         narrations_analyzed += 1
         matches = classify_narration(narration)
+
+        # BUG 9 FIX: Also flag if party ledger is "Cash" (even if narration doesn't say "cash")
+        if party and party.strip().upper() in ("CASH", "CASH A/C", "CASH ACCOUNT", "CASH IN HAND", "CASH-IN-HAND", "PETTY CASH"):
+            cash_already = any(m["category"] == "Cash Transactions" for m in matches)
+            if not cash_already:
+                matches.append({
+                    "category": "Cash Transactions",
+                    "comment": "Cash transaction (party is Cash ledger) - verify Sec 269ST/269SS compliance",
+                    "severity": "MEDIUM",
+                })
 
         if not matches:
             continue
