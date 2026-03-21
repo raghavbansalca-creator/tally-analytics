@@ -42,8 +42,8 @@ CATEGORIES = [
             r"\bloan\b", r"\blent\b", r"\bborrowed\b",
             r"\bemi\b", r"\brepayment\b",
             # "advance" — exclude "advance tax" which is different
-            r"\badvance\s+(?:to|from|given|received|paid|against)\b",
-            r"\b(?:staff|employee|salary|personal)\s+advance\b",
+            r"\badvances?\s+(?:to|from|given|received|paid|against)\b",
+            r"\b(?:staff|employee|salary|personal)\s+advances?\b",
             r"\binterest\s+(?:on|paid|received|charged)\b",
         ],
         "comment": "Loan/advance - verify Sec 185/186 compliance, TDS applicability",
@@ -76,11 +76,11 @@ CATEGORIES = [
     {
         "name": "Rent Payments",
         "patterns": [
-            r"\b(?:office|warehouse|godown|shop|factory|premises|property|building)\s+rent\b",
-            r"\brent\s+(?:paid|payment|for|of)\b",
+            r"\b(?:office|warehouse|godown|shop|factory|premises|property|building|guest\s*house)\s+rent(?:ed|ing|al|s)?\b",
+            r"\brent(?:ed|ing|al)?\s+(?:paid|payment|for|of|a/?c|account)\b",
             r"\blease\s+(?:rent|payment|amount)\b", r"\blicense fee\b",
-            r"\bmonthly\s+rent\b", r"\brent\s+a/?c\b",
-            # Exclude: "auto rent", "bus rent", "porter rent" (transport costs)
+            r"\bmonthly\s+rent\b",
+            r"\brent(?:ed|ing)?\s+(?:office|shop|warehouse|godown|premises|space|room|flat|house)\b",
         ],
         "comment": "Rent payment - verify TDS u/s 194I, GST RCM if applicable",
         "severity": "LOW",
