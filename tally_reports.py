@@ -42,7 +42,7 @@ def get_all_groups_under(conn, root_groups):
     return all_groups
 
 
-def get_ledger_totals_by_group(conn, group_names, as_of_date=None):
+def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=None, date_to=None):
     """Get ledger closing balances grouped by their parent group.
     Returns dict: {group_name: [(ledger_name, closing_balance), ...]}
 
@@ -54,7 +54,30 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None):
 
     placeholders = ",".join(["?"] * len(group_names))
 
-    if as_of_date:
+    if date_from or date_to:
+        date_cond = ""
+        date_params = []
+        if date_from:
+            date_cond += " AND v.DATE >= ?"
+            date_params.append(date_from)
+        if date_to:
+            date_cond += " AND v.DATE <= ?"
+            date_params.append(date_to)
+        sql = f"""
+        SELECT l.PARENT, l.NAME,
+               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                   WHERE a.LEDGERNAME = l.NAME{date_cond}
+               ), 0) as balance
+        FROM mst_ledger l
+        WHERE l.PARENT IN ({placeholders})
+        ORDER BY l.PARENT, l.NAME
+        """
+        rows = conn.execute(sql, date_params + list(group_names)).fetchall()
+    elif as_of_date:
         # Calculate from opening balance + sum of transactions
         sql = f"""
         SELECT l.PARENT, l.NAME,
@@ -89,10 +112,32 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None):
 
 # ── TRIAL BALANCE ────────────────────────────────────────────────────────────
 
-def trial_balance(conn, as_of_date=None):
+def trial_balance(conn, as_of_date=None, date_from=None, date_to=None):
     """Generate Trial Balance: all ledgers with their closing balances.
     Returns list of (group, ledger, debit, credit)."""
-    if as_of_date:
+    if date_from or date_to:
+        date_cond = ""
+        params = []
+        if date_from:
+            date_cond += " AND v.DATE >= ?"
+            params.append(date_from)
+        if date_to:
+            date_cond += " AND v.DATE <= ?"
+            params.append(date_to)
+        sql = f"""
+        SELECT l.PARENT, l.NAME,
+               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                   WHERE a.LEDGERNAME = l.NAME{date_cond}
+               ), 0) as balance
+        FROM mst_ledger l
+        ORDER BY l.PARENT, l.NAME
+        """
+        rows = conn.execute(sql, params).fetchall()
+    elif as_of_date:
         sql = """
         SELECT l.PARENT, l.NAME,
                COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
@@ -213,7 +258,7 @@ def profit_and_loss(conn, from_date=None, to_date=None):
 
 # ── BALANCE SHEET ────────────────────────────────────────────────────────────
 
-def balance_sheet(conn, as_of_date=None):
+def balance_sheet(conn, as_of_date=None, date_from=None, date_to=None):
     """Generate Balance Sheet.
     Returns dict with assets and liabilities grouped.
 
@@ -227,8 +272,8 @@ def balance_sheet(conn, as_of_date=None):
     asset_groups = get_all_groups_under(conn, BS_ASSET_ROOTS)
     liability_groups = get_all_groups_under(conn, BS_LIABILITY_ROOTS)
 
-    assets = get_ledger_totals_by_group(conn, asset_groups, as_of_date)
-    liabilities = get_ledger_totals_by_group(conn, liability_groups, as_of_date)
+    assets = get_ledger_totals_by_group(conn, asset_groups, as_of_date, date_from=date_from, date_to=date_to)
+    liabilities = get_ledger_totals_by_group(conn, liability_groups, as_of_date, date_from=date_from, date_to=date_to)
 
     # Filter zero balances
     assets = {g: [(n, b) for n, b in entries if b != 0] for g, entries in assets.items()}
@@ -339,31 +384,81 @@ def pl_group_drilldown(conn, group_name, from_date=None, to_date=None):
 
 # ── DEBTOR/CREDITOR AGING ────────────────────────────────────────────────────
 
-def debtor_aging(conn):
+def debtor_aging(conn, date_from=None, date_to=None):
     """Simple debtor aging based on closing balances from mst_ledger.
-    Groups: Sundry Debtors."""
-    sql = """
-    SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
-    FROM mst_ledger
-    WHERE PARENT = 'Sundry Debtors'
-      AND CAST(CLOSINGBALANCE AS REAL) != 0
-    ORDER BY CAST(CLOSINGBALANCE AS REAL)
-    """
-    rows = conn.execute(sql).fetchall()
-    return [(name, abs(bal)) for name, bal in rows if bal]
+    Groups: Sundry Debtors.
+    When date_from/date_to provided, computes opening + transactions in range."""
+    if date_from or date_to:
+        date_cond = ""
+        params = []
+        if date_from:
+            date_cond += " AND v.DATE >= ?"
+            params.append(date_from)
+        if date_to:
+            date_cond += " AND v.DATE <= ?"
+            params.append(date_to)
+        sql = f"""
+        SELECT l.NAME,
+               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                   WHERE a.LEDGERNAME = l.NAME{date_cond}
+               ), 0) as balance
+        FROM mst_ledger l
+        WHERE l.PARENT = 'Sundry Debtors'
+        ORDER BY balance
+        """
+        rows = conn.execute(sql, params).fetchall()
+    else:
+        sql = """
+        SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
+        FROM mst_ledger
+        WHERE PARENT = 'Sundry Debtors'
+          AND CAST(CLOSINGBALANCE AS REAL) != 0
+        ORDER BY CAST(CLOSINGBALANCE AS REAL)
+        """
+        rows = conn.execute(sql).fetchall()
+    return [(name, abs(bal)) for name, bal in rows if bal and bal != 0]
 
 
-def creditor_aging(conn):
-    """Simple creditor listing based on closing balances."""
-    sql = """
-    SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
-    FROM mst_ledger
-    WHERE PARENT = 'Sundry Creditors'
-      AND CAST(CLOSINGBALANCE AS REAL) != 0
-    ORDER BY CAST(CLOSINGBALANCE AS REAL)
-    """
-    rows = conn.execute(sql).fetchall()
-    return [(name, abs(bal)) for name, bal in rows if bal]
+def creditor_aging(conn, date_from=None, date_to=None):
+    """Simple creditor listing based on closing balances.
+    When date_from/date_to provided, computes opening + transactions in range."""
+    if date_from or date_to:
+        date_cond = ""
+        params = []
+        if date_from:
+            date_cond += " AND v.DATE >= ?"
+            params.append(date_from)
+        if date_to:
+            date_cond += " AND v.DATE <= ?"
+            params.append(date_to)
+        sql = f"""
+        SELECT l.NAME,
+               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                   WHERE a.LEDGERNAME = l.NAME{date_cond}
+               ), 0) as balance
+        FROM mst_ledger l
+        WHERE l.PARENT = 'Sundry Creditors'
+        ORDER BY balance
+        """
+        rows = conn.execute(sql, params).fetchall()
+    else:
+        sql = """
+        SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
+        FROM mst_ledger
+        WHERE PARENT = 'Sundry Creditors'
+          AND CAST(CLOSINGBALANCE AS REAL) != 0
+        ORDER BY CAST(CLOSINGBALANCE AS REAL)
+        """
+        rows = conn.execute(sql).fetchall()
+    return [(name, abs(bal)) for name, bal in rows if bal and bal != 0]
 
 
 # ── VOUCHER TYPE SUMMARY ────────────────────────────────────────────────────

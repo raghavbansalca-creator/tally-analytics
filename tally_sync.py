@@ -103,7 +103,7 @@ def _build_active_company_xml():
 <TDL><TDLMESSAGE>
 <COLLECTION NAME="SLVCompanyInfo" ISMODIFY="No">
 <TYPE>Company</TYPE>
-<FETCH>NAME, BASICCOMPANYFORMALNAME, STATENAME, PINCODE, EMAIL, PHONENUMBER, INCOMETAXNUMBER, GSTREGISTRATIONTYPE</FETCH>
+<FETCH>NAME, BASICCOMPANYFORMALNAME, STATENAME, PINCODE, EMAIL, PHONENUMBER, INCOMETAXNUMBER, GSTREGISTRATIONTYPE, GSTIN</FETCH>
 </COLLECTION>
 </TDLMESSAGE></TDL>
 </DESC></BODY></ENVELOPE>"""
@@ -143,8 +143,8 @@ def _parse_vouchers(xml_str):
     trn_inventory = []
     trn_batch = []
 
-    LEDGER_TAGS = {"ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST"}
-    INVENTORY_TAGS = {"ALLINVENTORYENTRIES.LIST", "INVENTORYENTRIES.LIST"}
+    LEDGER_TAGS = {"ALLLEDGERENTRIES.LIST"}
+    INVENTORY_TAGS = {"ALLINVENTORYENTRIES.LIST"}
     SKIP_TAGS = LEDGER_TAGS | INVENTORY_TAGS | {
         "BILLALLOCATIONS.LIST", "BANKALLOCATIONS.LIST",
         "BATCHALLOCATIONS.LIST", "CATEGORYALLOCATIONS.LIST",
@@ -473,7 +473,7 @@ def sync_all(host, port=9000, db_path="tally_data.db", progress_callback=None):
     print(f"Started: {started.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'=' * 60}\n")
 
-    # Step 0: Test connection & get company name
+    # Step 0: Test connection & get company name + details
     step = "Testing connection..."
     print(step)
     if progress_callback:
@@ -485,7 +485,18 @@ def sync_all(host, port=9000, db_path="tally_data.db", progress_callback=None):
         return {"success": False, "error": conn_result["error"]}
 
     company = conn_result["company"]
-    print(f"  Connected! Company: {company}\n")
+    print(f"  Connected! Company: {company}")
+
+    # Get company details (GSTIN, state, etc.)
+    company_info = {}
+    try:
+        company_info = get_company_info(host, port)
+        if company_info:
+            print(f"  GSTIN: {company_info.get('GSTIN', 'N/A')}")
+            print(f"  State: {company_info.get('STATENAME', 'N/A')}")
+    except Exception:
+        pass
+    print()
 
     all_stats = {}
 
@@ -507,6 +518,19 @@ def sync_all(host, port=9000, db_path="tally_data.db", progress_callback=None):
     conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("loaded_at", datetime.datetime.now().isoformat()))
     conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("sync_source", "tally_live"))
     conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("tally_host", f"{host}:{port}"))
+    # Try GSTIN from company info first, then fall back to voucher data
+    gstin = company_info.get("GSTIN", "")
+    if not gstin:
+        row = conn.execute(
+            "SELECT CMPGSTIN FROM trn_voucher WHERE CMPGSTIN IS NOT NULL AND CMPGSTIN != '' LIMIT 1"
+        ).fetchone()
+        gstin = row[0] if row else ""
+    if gstin:
+        conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("company_gstin", gstin))
+    if company_info.get("STATENAME"):
+        conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("company_state", company_info["STATENAME"]))
+    if company_info.get("INCOMETAXNUMBER"):
+        conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("company_pan", company_info["INCOMETAXNUMBER"]))
     conn.commit()
 
     # Summary

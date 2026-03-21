@@ -16,88 +16,128 @@ def get_conn():
 
 # ── MONTHLY SALES & PURCHASE ────────────────────────────────────────────────
 
-def monthly_sales(conn):
+def monthly_sales(conn, date_from=None, date_to=None):
     """Monthly sales with count, amount, avg invoice value."""
-    return conn.execute("""
+    date_filter = ""
+    params = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        params.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        params.append(date_to)
+    return conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                COUNT(DISTINCT v.GUID) as vch_count,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as sales_amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Sales Accounts'
+        WHERE l.PARENT = 'Sales Accounts'{date_filter}
         GROUP BY month ORDER BY month
-    """).fetchall()
+    """, params).fetchall()
 
 
-def monthly_purchases(conn):
-    return conn.execute("""
+def monthly_purchases(conn, date_from=None, date_to=None):
+    date_filter = ""
+    params = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        params.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        params.append(date_to)
+    return conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                COUNT(DISTINCT v.GUID) as vch_count,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Purchase Accounts'
+        WHERE l.PARENT = 'Purchase Accounts'{date_filter}
         GROUP BY month ORDER BY month
-    """).fetchall()
+    """, params).fetchall()
 
 
-def monthly_receipts_payments(conn):
+def monthly_receipts_payments(conn, date_from=None, date_to=None):
     """Monthly cash inflows (receipts) and outflows (payments)."""
-    receipts = conn.execute("""
+    date_filter = ""
+    params = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        params.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        params.append(date_to)
+    receipts = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                COUNT(DISTINCT v.GUID) as cnt,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE v.VOUCHERTYPENAME = 'Receipt' AND a.ISDEEMEDPOSITIVE = 'Yes'
+        WHERE v.VOUCHERTYPENAME = 'Receipt' AND a.ISDEEMEDPOSITIVE = 'Yes'{date_filter}
         GROUP BY month ORDER BY month
-    """).fetchall()
+    """, params).fetchall()
 
-    payments = conn.execute("""
+    payments = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                COUNT(DISTINCT v.GUID) as cnt,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE v.VOUCHERTYPENAME = 'Payment' AND a.ISDEEMEDPOSITIVE = 'Yes'
+        WHERE v.VOUCHERTYPENAME = 'Payment' AND a.ISDEEMEDPOSITIVE = 'Yes'{date_filter}
         GROUP BY month ORDER BY month
-    """).fetchall()
+    """, params).fetchall()
 
     return receipts, payments
 
 
-def monthly_expenses(conn):
+def monthly_expenses(conn, date_from=None, date_to=None):
     """Monthly indirect expenses breakdown."""
-    return conn.execute("""
+    date_filter = ""
+    params = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        params.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        params.append(date_to)
+    return conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                a.LEDGERNAME,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0
+        WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0{date_filter}
         GROUP BY month, a.LEDGERNAME
         ORDER BY month, amt DESC
-    """).fetchall()
+    """, params).fetchall()
 
 
-def monthly_gross_profit(conn):
+def monthly_gross_profit(conn, date_from=None, date_to=None):
     """Monthly P&L summary: sales, purchases, gross profit, expenses, net profit."""
-    sales = {r[0]: r[2] for r in monthly_sales(conn)}
-    purchases = {r[0]: r[2] for r in monthly_purchases(conn)}
+    sales = {r[0]: r[2] for r in monthly_sales(conn, date_from=date_from, date_to=date_to)}
+    purchases = {r[0]: r[2] for r in monthly_purchases(conn, date_from=date_from, date_to=date_to)}
 
     # Monthly indirect expenses total
-    exp_rows = conn.execute("""
+    date_filter = ""
+    _params = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        _params.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        _params.append(date_to)
+    exp_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0
+        WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0{date_filter}
         GROUP BY month ORDER BY month
-    """).fetchall()
+    """, _params).fetchall()
     expenses = {r[0]: r[1] for r in exp_rows}
 
     months = sorted(set(list(sales.keys()) + list(purchases.keys())))
@@ -123,9 +163,18 @@ def monthly_gross_profit(conn):
 
 # ── PARTY ANALYSIS ──────────────────────────────────────────────────────────
 
-def top_customers_by_sales(conn, limit=15):
+def top_customers_by_sales(conn, limit=15, date_from=None, date_to=None):
     """Top customers by total sales value."""
-    return conn.execute("""
+    date_filter = ""
+    params = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        params.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        params.append(date_to)
+    params.append(limit)
+    return conn.execute(f"""
         SELECT v.PARTYLEDGERNAME as party,
                COUNT(DISTINCT v.GUID) as invoice_count,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as total_sales
@@ -133,13 +182,22 @@ def top_customers_by_sales(conn, limit=15):
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
         WHERE l.PARENT = 'Sales Accounts'
-          AND v.PARTYLEDGERNAME IS NOT NULL AND v.PARTYLEDGERNAME != ''
+          AND v.PARTYLEDGERNAME IS NOT NULL AND v.PARTYLEDGERNAME != ''{date_filter}
         GROUP BY party ORDER BY total_sales DESC LIMIT ?
-    """, (limit,)).fetchall()
+    """, params).fetchall()
 
 
-def top_suppliers_by_purchase(conn, limit=15):
-    return conn.execute("""
+def top_suppliers_by_purchase(conn, limit=15, date_from=None, date_to=None):
+    date_filter = ""
+    params = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        params.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        params.append(date_to)
+    params.append(limit)
+    return conn.execute(f"""
         SELECT v.PARTYLEDGERNAME as party,
                COUNT(DISTINCT v.GUID) as invoice_count,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as total_purchases
@@ -147,35 +205,67 @@ def top_suppliers_by_purchase(conn, limit=15):
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
         WHERE l.PARENT = 'Purchase Accounts'
-          AND v.PARTYLEDGERNAME IS NOT NULL AND v.PARTYLEDGERNAME != ''
+          AND v.PARTYLEDGERNAME IS NOT NULL AND v.PARTYLEDGERNAME != ''{date_filter}
         GROUP BY party ORDER BY total_purchases DESC LIMIT ?
-    """, (limit,)).fetchall()
+    """, params).fetchall()
 
 
-def customer_monthly_sales(conn, top_n=5):
+def customer_monthly_sales(conn, top_n=5, date_from=None, date_to=None):
     """Monthly sales for top N customers."""
-    top = top_customers_by_sales(conn, top_n)
+    top = top_customers_by_sales(conn, top_n, date_from=date_from, date_to=date_to)
     top_names = [r[0] for r in top]
+
+    date_filter = ""
+    params_extra = []
+    if date_from:
+        date_filter += " AND v.DATE >= ?"
+        params_extra.append(date_from)
+    if date_to:
+        date_filter += " AND v.DATE <= ?"
+        params_extra.append(date_to)
 
     result = {}
     for name in top_names:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Sales Accounts' AND v.PARTYLEDGERNAME = ?
+            WHERE l.PARENT = 'Sales Accounts' AND v.PARTYLEDGERNAME = ?{date_filter}
             GROUP BY month ORDER BY month
-        """, (name,)).fetchall()
+        """, [name] + params_extra).fetchall()
         result[name] = {r[0]: r[1] for r in rows}
     return result
 
 
 # ── BANK ANALYSIS ───────────────────────────────────────────────────────────
 
-def bank_balances(conn):
+def bank_balances(conn, date_from=None, date_to=None):
     """All bank account balances."""
+    if date_from or date_to:
+        date_cond = ""
+        params = []
+        if date_from:
+            date_cond += " AND v.DATE >= ?"
+            params.append(date_from)
+        if date_to:
+            date_cond += " AND v.DATE <= ?"
+            params.append(date_to)
+        return conn.execute(f"""
+            SELECT l.NAME, l.PARENT,
+                   CAST(l.OPENINGBALANCE AS REAL) as opening,
+                   COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+                   COALESCE((
+                       SELECT SUM(CAST(a.AMOUNT AS REAL))
+                       FROM trn_accounting a
+                       JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                       WHERE a.LEDGERNAME = l.NAME{date_cond}
+                   ), 0) as closing
+            FROM mst_ledger l
+            WHERE l.PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+            ORDER BY ABS(closing) DESC
+        """, params).fetchall()
     return conn.execute("""
         SELECT NAME, PARENT,
                CAST(OPENINGBALANCE AS REAL) as opening,

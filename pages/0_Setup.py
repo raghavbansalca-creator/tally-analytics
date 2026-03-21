@@ -125,13 +125,12 @@ with col_sync:
             status_text = st.empty()
             detail_text = st.empty()
 
-            steps_done = 0
+            progress_state = {"done": 0}
             total_steps = 10  # approximate
 
             def progress_callback(step_name, current, total):
-                nonlocal steps_done
-                steps_done += 1
-                pct = min(steps_done / total_steps, 0.99)
+                progress_state["done"] += 1
+                pct = min(progress_state["done"] / total_steps, 0.99)
                 progress_bar.progress(pct)
                 status_text.markdown(f"**{step_name}**")
                 if current and total:

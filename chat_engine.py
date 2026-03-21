@@ -21,6 +21,17 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+
+def _get_company_name():
+    """Get company name from metadata."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT value FROM _metadata WHERE key = 'company_name'").fetchone()
+        conn.close()
+        return row[0] if row else "the company"
+    except Exception:
+        return "the company"
 USE_LLM = True  # Set to False to force keyword-only mode (skip Gemini)
 
 # ── GEMINI LLM INTEGRATION ───────────────────────────────────────────────────
@@ -42,9 +53,11 @@ def _get_gemini_model():
     return _gemini_model if _gemini_model else None
 
 
-GEMINI_SYSTEM_PROMPT = """You are an expert Chartered Accountant AI assistant for "ROHIT PHARMA" — a pharmaceutical distribution company based in Uttar Pradesh, India.
+def _get_system_prompt():
+    company = _get_company_name()
+    return f"""You are an expert Chartered Accountant AI assistant for "{company}".
 
-You have access to the company's complete Tally ERP financial data for FY 2025-26 (April 2025 to January 2026).
+You have access to the company's complete Tally ERP financial data.
 
 YOUR PERSONALITY:
 - You speak like a knowledgeable, friendly CA advisor
@@ -56,7 +69,7 @@ YOUR PERSONALITY:
 - When discussing amounts, always use ₹ symbol
 
 IMPORTANT RULES:
-- You can ONLY answer questions about ROHIT PHARMA's financial data
+- You can ONLY answer questions about {company}'s financial data
 - For non-financial questions (weather, cricket, movies, etc.), politely redirect to financial topics
 - NEVER suggest modifying data — you are read-only
 - If asked to delete/modify/create anything, explain you're a read-only analyst
@@ -329,7 +342,7 @@ WORKING CAPITAL:
   Total Ledger Accounts: {total_ledgers}
   Total Debtors (customers): {total_debtors}
   Total Creditors (suppliers): {total_creditors}
-  Data Period: April 2025 to January 2026 (FY 2025-26)""")
+  Data Period: April 2025 to January 2026 """)
         except Exception:
             pass
 
@@ -356,7 +369,7 @@ def ask_gemini(question, conversation_history=None):
         data_context = _build_data_context(question)
 
         # Build the full prompt
-        full_prompt = f"""{GEMINI_SYSTEM_PROMPT}
+        full_prompt = f"""{_get_system_prompt()}
 
 --- RELEVANT FINANCIAL DATA ---
 {data_context}
@@ -372,7 +385,7 @@ Respond naturally as a CA advisor. Use the data above to give an accurate, insig
                 f"{'User' if i % 2 == 0 else 'Assistant'}: {msg}"
                 for i, msg in enumerate(conversation_history[-6:])  # Last 3 exchanges
             ])
-            full_prompt = f"""{GEMINI_SYSTEM_PROMPT}
+            full_prompt = f"""{_get_system_prompt()}
 
 --- CONVERSATION HISTORY ---
 {history_text}
@@ -401,7 +414,7 @@ Respond naturally as a CA advisor. Use the data above to give an accurate, insig
 # ── SCHEMA CONTEXT FOR LLM ──────────────────────────────────────────────────
 
 SCHEMA_CONTEXT = """
-You are an AI assistant for a Chartered Accountant analyzing Tally ERP data for "ROHIT PHARMA" (a pharmaceutical distribution company).
+You are an AI assistant for a Chartered Accountant analyzing Tally ERP data.
 
 DATABASE SCHEMA (SQLite):
 
@@ -432,7 +445,7 @@ DATABASE SCHEMA (SQLite):
 
 IMPORTANT TALLY CONVENTIONS:
 - Dates are stored as YYYYMMDD strings (e.g., '20250401' = April 1, 2025)
-- ACTUAL DATA RANGE: April 2025 (20250401) to January 2026 (20260131). This is FY 2025-26.
+- ACTUAL DATA RANGE: April 2025 (20250401) to January 2026 (20260131). This is current FY.
 - When generating reports WITHOUT a specific date request from the user, pass null/None for dates to include ALL data. Do NOT assume a financial year date range.
 - AMOUNT in trn_accounting: negative = debit side, positive = credit side
 - For Sundry Debtors: negative closing balance = they owe us (receivable is positive in accounting terms)
@@ -566,7 +579,7 @@ def _extract_month_code(q):
     """Extract YYYYMM month code from natural language question."""
     for name, mm in MONTH_MAP.items():
         if name in q:
-            # Determine year based on FY 2025-26 (Apr 2025 to Mar 2026)
+            # Determine year based on current FY (Apr 2025 to Mar 2026)
             m_int = int(mm)
             if m_int >= 4:
                 return f"2025{mm}"
@@ -710,7 +723,7 @@ def smart_answer(question):
     q_original = question.strip()
 
     if not q or len(q) < 2:
-        return "Could you please ask a specific question about your ROHIT PHARMA financial data? For example: 'Am I making profit?', 'Who owes me the most?', or 'Show me October sales'."
+        return f"Could you please ask a specific question about your {_get_company_name()} financial data? For example: 'Am I making profit?', 'Who owes me the most?', or 'Show me October sales'."
 
     conn = get_conn()
 
@@ -726,13 +739,13 @@ def smart_answer(question):
         if any(kw in q for kw in ["weather", "cricket", "movie", "recipe", "news",
                                    "stock market", "share price", "nifty", "sensex",
                                    "bitcoin", "crypto", "sports", "politics"]):
-            return ("I'm your financial assistant for **ROHIT PHARMA**. I specialize in your Tally accounting data — "
+            return (f"I'm your financial assistant for **{_get_company_name()}**. I specialize in your Tally accounting data — "
                     "P&L, Balance Sheet, ledgers, debtors, creditors, GST, and business analytics. "
                     "Ask me anything about your financials!")
 
         if any(kw in q for kw in ["what can you do", "capabilities", "what do you do",
                                    "what are your feature", "help me understand"]):
-            return ("I'm your intelligent Tally assistant for **ROHIT PHARMA** (FY 2025-26). Here's what I can help with:\n\n"
+            return (f"I'm your intelligent Tally assistant for **{_get_company_name()}**. Here's what I can help with:\n\n"
                     "**Financial Reports:**\n"
                     "- P&L, Balance Sheet, Trial Balance\n"
                     "- Monthly sales/purchase trends\n\n"
@@ -781,7 +794,7 @@ def smart_answer(question):
             status_emoji = "Profitable" if np_ >= 0 else "In Loss"
             margin = (np_ / pl["total_income"] * 100) if pl["total_income"] else 0
 
-            lines = [f"**ROHIT PHARMA — Business Summary (FY 2025-26)**\n"]
+            lines = [f"**{_get_company_name()} — Business Summary **\n"]
             lines.append(f"**Revenue:** {_fmt_indian(pl['total_income'])} across {total_invoices} invoices")
             lines.append(f"**Gross Profit:** {_fmt_indian(pl['gross_profit'])} ({ratios['gross_profit_margin']:.1f}% margin)")
             lines.append(f"**Net Profit:** {_fmt_indian(np_)} ({margin:.1f}% margin) — **{status_emoji}**\n")
@@ -818,7 +831,7 @@ def smart_answer(question):
             margin = (np_ / ti * 100) if ti else 0
             gp_margin = (gp / ti * 100) if ti else 0
             status = "profit" if np_ >= 0 else "loss"
-            lines = [f"Based on your FY 2025-26 data, ROHIT PHARMA shows a **net {status} of {_fmt_indian(np_)}** (margin: {margin:.1f}%).\n"]
+            lines = [f"Based on your current FY data, {_get_company_name()} shows a **net {status} of {_fmt_indian(np_)}** (margin: {margin:.1f}%).\n"]
             lines.append(f"- **Total Income:** {_fmt_indian(ti)}")
             lines.append(f"- **Total Expenses:** {_fmt_indian(te)}")
             lines.append(f"- **Gross Profit:** {_fmt_indian(gp)} ({gp_margin:.1f}% margin)")
@@ -871,7 +884,7 @@ def smart_answer(question):
             ebitda = operating_profit + depr + interest
             op_margin = (operating_profit / ti * 100) if ti else 0
             ebitda_margin = (ebitda / ti * 100) if ti else 0
-            lines = [f"Based on your FY 2025-26 data:\n"]
+            lines = [f"Based on your current FY data:\n"]
             lines.append(f"- **Revenue:** {_fmt_indian(ti)}")
             lines.append(f"- **Gross Profit:** {_fmt_indian(gp)}")
             lines.append(f"- **Indirect Expenses:** {_fmt_indian(indirect_total)}")
@@ -896,7 +909,7 @@ def smart_answer(question):
                     all_expenses.append((ledger, abs(amt), group))
             all_expenses.sort(key=lambda x: x[1], reverse=True)
             total_exp = sum(e[1] for e in all_expenses)
-            lines = ["**Top Expenses (FY 2025-26):**\n"]
+            lines = ["**Top Expenses :**\n"]
             for i, (name, amt, group) in enumerate(all_expenses[:10], 1):
                 pct = (amt / total_exp * 100) if total_exp else 0
                 lines.append(f"{i}. **{name}** ({group}): {_fmt_indian(amt)} — {pct:.1f}% of total")
@@ -918,7 +931,7 @@ def smart_answer(question):
             wc = working_capital_analysis(conn)
             cr = wc["current_ratio"]
             health = "Healthy" if cr > 1.5 else ("Tight" if cr > 1 else "Deficit — liabilities exceed current assets")
-            lines = [f"**Working Capital Analysis (ROHIT PHARMA)**\n"]
+            lines = [f"**Working Capital Analysis ({_get_company_name()})**\n"]
             lines.append(f"**Current Ratio: {cr:.2f}** — {health}\n")
             lines.append(f"**Working Capital: {_fmt_indian(wc['working_capital'])}**\n")
             lines.append("**Current Assets:**")
@@ -952,7 +965,7 @@ def smart_answer(question):
                 ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
             """).fetchall()
             total = sum(abs(r[2] or 0) for r in rows)
-            lines = [f"**Cash & Bank Position (ROHIT PHARMA)**\n"]
+            lines = [f"**Cash & Bank Position ({_get_company_name()})**\n"]
             lines.append(f"**Total Available: {_fmt_indian(total)}**\n")
             for name, parent, bal in rows:
                 balance = abs(bal or 0)
@@ -1002,7 +1015,7 @@ def smart_answer(question):
                 from gst_engine import gst_monthly_comparison
                 monthly = gst_monthly_comparison(conn)
                 if monthly:
-                    lines = ["**GST Monthly Summary (ROHIT PHARMA, FY 2025-26)**\n"]
+                    lines = [f"**GST Monthly Summary ({_get_company_name()})**\n"]
                     lines.append(f"{'Month':<12} | {'Output Tax':>12} | {'Input Tax':>12} | {'Net':>12} | Status")
                     lines.append("-" * 68)
                     total_out, total_inp, total_net = 0, 0, 0
@@ -1071,7 +1084,7 @@ def smart_answer(question):
             pl = profit_and_loss(conn)
             bs = balance_sheet(conn)
 
-            lines = [f"**Key Financial Ratios — ROHIT PHARMA (FY 2025-26)**\n"]
+            lines = [f"**Key Financial Ratios — {_get_company_name()} **\n"]
             lines.append("**Profitability:**")
             lines.append(f"  - Gross Profit Margin: {ratios['gross_profit_margin']:.1f}%")
             lines.append(f"  - Net Profit Margin: {ratios['net_profit_margin']:.1f}%")
@@ -1225,7 +1238,7 @@ def smart_answer(question):
             if not recommendations:
                 recommendations.append("Your business metrics look good! Maintain current practices and keep a close watch on cash flow.")
 
-            lines = ["**Recommendations for ROHIT PHARMA:**\n"]
+            lines = [f"**Recommendations for {_get_company_name()}:**\n"]
             for i, r in enumerate(recommendations, 1):
                 lines.append(f"{i}. {r}\n")
             return "\n".join(lines)
@@ -1242,7 +1255,7 @@ def smart_answer(question):
             data = monthly_sales(conn)
             total = sum(r[2] for r in data) if data else 0
             total_inv = sum(r[1] for r in data) if data else 0
-            lines = [f"**Monthly Sales Trend — ROHIT PHARMA (FY 2025-26)**\n"]
+            lines = [f"**Monthly Sales Trend — {_get_company_name()} **\n"]
             lines.append(f"**Total Revenue: {_fmt_indian(total)}** | **Invoices: {total_inv}**\n")
             prev = None
             best_month = max(data, key=lambda x: x[2]) if data else None
@@ -1278,7 +1291,7 @@ def smart_answer(question):
             from analytics import monthly_purchases
             data = monthly_purchases(conn)
             total = sum(r[2] for r in data) if data else 0
-            lines = [f"**Monthly Purchase Trend — ROHIT PHARMA (FY 2025-26)**\n"]
+            lines = [f"**Monthly Purchase Trend — {_get_company_name()} **\n"]
             lines.append(f"**Total Purchases: {_fmt_indian(total)}**\n")
             prev = None
             for month, count, amt in data:
@@ -1392,7 +1405,7 @@ def smart_answer(question):
             if gp_data:
                 by_sales = max(gp_data, key=lambda x: x["sales"])
                 by_profit = max(gp_data, key=lambda x: x["net_profit"])
-                lines = ["**Best Performing Months (FY 2025-26):**\n"]
+                lines = ["**Best Performing Months :**\n"]
                 lines.append(f"**Highest Sales:** {_month_full(by_sales['month'])} — {_fmt_indian(by_sales['sales'])} (GP: {by_sales['gp_margin']:.1f}%)")
                 lines.append(f"**Highest Net Profit:** {_month_full(by_profit['month'])} — {_fmt_indian(by_profit['net_profit'])} (NP: {by_profit['np_margin']:.1f}%)\n")
                 lines.append("**Monthly Ranking by Sales:**")
@@ -1408,7 +1421,7 @@ def smart_answer(question):
             if gp_data:
                 by_sales = min(gp_data, key=lambda x: x["sales"])
                 by_profit = min(gp_data, key=lambda x: x["net_profit"])
-                lines = ["**Weakest Months (FY 2025-26):**\n"]
+                lines = ["**Weakest Months :**\n"]
                 lines.append(f"**Lowest Sales:** {_month_full(by_sales['month'])} — {_fmt_indian(by_sales['sales'])}")
                 lines.append(f"**Lowest Net Profit:** {_month_full(by_profit['month'])} — {_fmt_indian(by_profit['net_profit'])}\n")
                 lines.append("**Monthly Ranking (lowest to highest sales):**")
@@ -1469,7 +1482,7 @@ def smart_answer(question):
                     profit_trend = "N/A"
                     first_np = second_np = 0
 
-                lines = ["**Business Trend Analysis (FY 2025-26):**\n"]
+                lines = ["**Business Trend Analysis :**\n"]
                 lines.append(f"**Sales Trend: {sales_trend}** ({'+' if sales_change > 0 else ''}{sales_change:.1f}%)")
                 lines.append(f"  - First half avg: {_fmt_indian(first_half_avg)}/month")
                 lines.append(f"  - Second half avg: {_fmt_indian(second_half_avg)}/month\n")
@@ -1532,7 +1545,7 @@ def smart_answer(question):
             if data:
                 total = sum(b for _, b in data)
                 sorted_data = sorted(data, key=lambda x: x[1], reverse=True)
-                lines = [f"**Top Debtors — ROHIT PHARMA**\n"]
+                lines = [f"**Top Debtors — {_get_company_name()}**\n"]
                 lines.append(f"**Total Outstanding: {_fmt_indian(total)}** from **{len(data)} parties**\n")
                 for i, (name, bal) in enumerate(sorted_data[:15], 1):
                     pct = (bal / total * 100) if total else 0
@@ -1554,7 +1567,7 @@ def smart_answer(question):
             if data:
                 total = sum(b for _, b in data)
                 sorted_data = sorted(data, key=lambda x: x[1], reverse=True)
-                lines = [f"**Top Creditors — ROHIT PHARMA**\n"]
+                lines = [f"**Top Creditors — {_get_company_name()}**\n"]
                 lines.append(f"**Total Payable: {_fmt_indian(total)}** to **{len(data)} suppliers**\n")
                 for i, (name, bal) in enumerate(sorted_data[:15], 1):
                     pct = (bal / total * 100) if total else 0
@@ -1712,7 +1725,7 @@ def smart_answer(question):
                 SELECT COUNT(DISTINCT GUID) FROM trn_voucher WHERE VOUCHERTYPENAME = 'Purchase'
             """).fetchone()
             total_purch_inv = row2[0] if row2 else 0
-            return (f"**Invoice Count (FY 2025-26):**\n\n"
+            return (f"**Invoice Count :**\n\n"
                     f"- **Sales Invoices:** {total_sales_inv}\n"
                     f"- **Purchase Bills:** {total_purch_inv}\n"
                     f"- **Total:** {total_sales_inv + total_purch_inv}")
@@ -1797,7 +1810,7 @@ def smart_answer(question):
                                    "how many voucher", "voucher count"]):
             vch_data = voucher_summary(conn)
             total_count = sum(c for _, c, _ in vch_data)
-            lines = ["**Transaction Summary (FY 2025-26):**\n"]
+            lines = ["**Transaction Summary :**\n"]
             lines.append(f"**Total Vouchers: {total_count}**\n")
             for vtype, count, total in vch_data:
                 lines.append(f"- **{vtype}:** {count} vouchers ({_fmt_indian(total or 0)})")
@@ -1855,7 +1868,7 @@ def smart_answer(question):
                 SELECT PARENT, COUNT(*) as cnt FROM mst_stock_item
                 WHERE PARENT IS NOT NULL GROUP BY PARENT ORDER BY cnt DESC LIMIT 10
             """).fetchall()
-            lines = [f"**Inventory Summary — ROHIT PHARMA**\n"]
+            lines = [f"**Inventory Summary — {_get_company_name()}**\n"]
             lines.append(f"**Total Stock Items: {count}**\n")
             if groups:
                 lines.append("**By Category:**")
@@ -1878,7 +1891,7 @@ def smart_answer(question):
             all_months = sorted(set(list(r_dict.keys()) + list(p_dict.keys())))
             total_r = sum(r_dict.values())
             total_p = sum(p_dict.values())
-            lines = [f"**Cash Flow Summary (FY 2025-26)**\n"]
+            lines = [f"**Cash Flow Summary **\n"]
             lines.append(f"**Total Receipts:** {_fmt_indian(total_r)}")
             lines.append(f"**Total Payments:** {_fmt_indian(total_p)}")
             lines.append(f"**Net Cash Flow:** {_fmt_indian(total_r - total_p)}\n")
@@ -1901,7 +1914,7 @@ def smart_answer(question):
             data = top_customers_by_sales(conn, 15)
             if data:
                 total_sales = sum(r[2] for r in data)
-                lines = [f"**Top Customers by Sales (FY 2025-26):**\n"]
+                lines = [f"**Top Customers by Sales :**\n"]
                 for i, (party, count, amt) in enumerate(data, 1):
                     pct = (amt / total_sales * 100) if total_sales else 0
                     lines.append(f"{i}. **{party}**: {_fmt_indian(amt)} ({count} invoices, {pct:.1f}%)")
@@ -1914,7 +1927,7 @@ def smart_answer(question):
             data = top_suppliers_by_purchase(conn, 15)
             if data:
                 total_purch = sum(r[2] for r in data)
-                lines = [f"**Top Suppliers by Purchase (FY 2025-26):**\n"]
+                lines = [f"**Top Suppliers by Purchase :**\n"]
                 for i, (party, count, amt) in enumerate(data, 1):
                     pct = (amt / total_purch * 100) if total_purch else 0
                     lines.append(f"{i}. **{party}**: {_fmt_indian(amt)} ({count} bills, {pct:.1f}%)")
@@ -1953,7 +1966,7 @@ def smart_answer(question):
             from analytics import monthly_gross_profit
             data = monthly_gross_profit(conn)
             if data:
-                lines = ["**Monthly P&L Summary (FY 2025-26):**\n"]
+                lines = ["**Monthly P&L Summary :**\n"]
                 lines.append(f"{'Month':<10} | {'Sales':>12} | {'Purchases':>12} | {'GP':>12} | {'NP':>12} | {'GP%':>5}")
                 lines.append("-" * 75)
                 for m in data:
@@ -2047,7 +2060,7 @@ def smart_answer(question):
         pl = profit_and_loss(conn)
         np_ = pl["net_profit"]
         return (f"I'm not sure I fully understood your question: \"{q_original}\"\n\n"
-                f"But here's a quick snapshot of **ROHIT PHARMA**:\n"
+                f"But here's a quick snapshot of **{_get_company_name()}**:\n"
                 f"- Net Profit: {_fmt_indian(np_)}\n"
                 f"- Revenue: {_fmt_indian(pl['total_income'])}\n\n"
                 f"Try asking me things like:\n"
@@ -2190,20 +2203,20 @@ def classify_intent(question):
                                "profit loss", "pandl", "mujhe p&l dikhao"]):
         conn.close()
         return {"action": "report_pl", "params": {},
-                "explanation": "Profit & Loss Account for ROHIT PHARMA"}
+                "explanation": f"Profit & Loss Account for {_get_company_name()}"}
 
     # Balance Sheet — exact phrases
     if any(kw in q for kw in ["balance sheet", "b/s", "assets and liabilities",
                                "financial position"]):
         conn.close()
         return {"action": "report_bs", "params": {},
-                "explanation": "Balance Sheet for ROHIT PHARMA"}
+                "explanation": f"Balance Sheet for {_get_company_name()}"}
 
     # Trial Balance — exact phrases
     if any(kw in q for kw in ["trial balance", "t/b"]):
         conn.close()
         return {"action": "report_tb", "params": {},
-                "explanation": "Trial Balance for ROHIT PHARMA"}
+                "explanation": f"Trial Balance for {_get_company_name()}"}
 
     # ── 2. DEBTORS / CREDITORS ──────────────────────────────────────────────
 
@@ -2326,7 +2339,7 @@ def classify_intent(question):
     if any(kw in q for kw in pl_concept_keywords):
         conn.close()
         return {"action": "report_pl", "params": {},
-                "explanation": "Profit & Loss Account for ROHIT PHARMA"}
+                "explanation": f"Profit & Loss Account for {_get_company_name()}"}
 
     # ── 6. SEMANTIC BS CONCEPTS ─────────────────────────────────────────────
     # Questions about ratios, assets, capital, net worth → report_bs
@@ -2348,7 +2361,7 @@ def classify_intent(question):
     if any(kw in q for kw in bs_concept_keywords):
         conn.close()
         return {"action": "report_bs", "params": {},
-                "explanation": "Balance Sheet for ROHIT PHARMA"}
+                "explanation": f"Balance Sheet for {_get_company_name()}"}
 
     # ── 7. COMMON EXPENSE/ACCOUNT LEDGER NAMES ─────────────────────────────
     # Direct match for well-known account names → ledger_detail
@@ -2724,7 +2737,7 @@ if __name__ == "__main__":
     print()
     print("  Seven Labs Vision — Tally AI Assistant")
     print("  ═══════════════════════════════════════")
-    print("  Company: ROHIT PHARMA")
+    print(f"  Company: {_get_company_name()}")
     print("  Type your question. Type 'quit' to exit.")
     print()
 
