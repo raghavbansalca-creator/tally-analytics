@@ -95,8 +95,17 @@ def _dedupe_filter():
     """Return SQL WHERE clause fragment to avoid double-counting.
     Data has each row duplicated: once with GSTTAXRATE='' and once with GSTTAXRATE='0'.
     We take only the rows where GSTTAXRATE is NULL or empty string.
+    If GSTTAXRATE column doesn't exist, return empty string (no filter needed).
     """
-    return "AND (a.GSTTAXRATE IS NULL OR a.GSTTAXRATE = '')"
+    try:
+        conn = get_conn()
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(trn_accounting)").fetchall()]
+        conn.close()
+        if "GSTTAXRATE" in cols:
+            return "AND (a.GSTTAXRATE IS NULL OR a.GSTTAXRATE = '')"
+        return ""
+    except:
+        return ""
 
 
 # ── AVAILABLE MONTHS ───────────────────────────────────────────────────────
@@ -344,6 +353,11 @@ def gstr1_hsn_summary(conn, month=None):
     """HSN-wise summary of outward supplies."""
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
     dedup = _dedupe_filter()
+
+    # Check if GSTHSNNAME column exists
+    cols = [c[1] for c in conn.execute("PRAGMA table_info(trn_accounting)").fetchall()]
+    if "GSTHSNNAME" not in cols:
+        return []
 
     # Get HSN data from accounting entries on sales vouchers
     rows = conn.execute(f"""
