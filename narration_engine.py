@@ -16,7 +16,9 @@ CATEGORIES = [
         "name": "Related Party",
         "patterns": [
             r"\bdirector\b", r"\bpromoter\b", r"\brelative\b",
-            r"\bfamily\b", r"\bspouse\b",
+            # "family" — exclude shop/business names containing "family"
+            r"\bfamily\s+(?:member|relation|trust|concern)\b",
+            r"\bspouse\b",
             # Family members — require context (not standalone product names)
             r"\b(?:his|her|my|the|to|of|for)\s+(?:son|daughter|brother|sister|father|mother)\b",
             r"\bdirector'?s?\s+(?:wife|husband|son|daughter|brother|sister|relative)\b",
@@ -40,11 +42,22 @@ CATEGORIES = [
         "name": "Loan/Advance",
         "patterns": [
             r"\bloan\b", r"\blent\b", r"\bborrowed\b",
-            r"\bemi\b", r"\brepayment\b",
-            # "advance" — exclude "advance tax" which is different
-            r"\badvances?\s+(?:to|from|given|received|paid|against)\b",
+            r"\bemi\b", r"(?:^|[\s_])emi(?:[\s_]|$)",  # EMI with underscores too (EMI_CEL...)
+            r"\brepayment\b",
+            # "advance" — broader matching, exclude "advance tax"
+            r"\badvances?\s+(?:to|from|given|received|paid|against|payment|amount)\b",
             r"\b(?:staff|employee|salary|personal)\s+advances?\b",
-            r"\binterest\s+(?:on|paid|received|charged)\b",
+            r"\b(?:transfer|trf|paid\s+for)\s+advances?\b",
+            r"\badvance\s+(?:payment|amount|for|to|from)\b",
+            r"(?:^|\s)advance(?:\s|$)",  # standalone "advance" at word boundary
+            # "interest" — broader matching for SAVC patterns (common typos: intrest, interst)
+            r"\bint(?:e?re?|re)st\s+(?:on|paid|received|charged|due|capitali[sz]ed|for)\b",
+            r"\bbeing\s+int(?:e?re?|re)st\b",
+            r"\bdebit\s+int(?:e?re?|re)st\b",
+            r"InterestCharged",  # no space variant
+            r"\bcasa\s+(?:debit\s+)?int(?:e?re?|re)st\b",
+            r"\b(?:paid\s+for|for)\s+int(?:e?re?|re)st\b",
+            r"\bsec\s+\d+[a-z]?\s+int(?:e?re?|re)st\b",  # SEC 94C INTEREST etc.
         ],
         "comment": "Loan/advance - verify Sec 185/186 compliance, TDS applicability",
         "severity": "MEDIUM",
@@ -52,9 +65,21 @@ CATEGORIES = [
     {
         "name": "Capital Expenditure",
         "patterns": [
-            r"\bpurchase of\b", r"\bacquisition\b", r"\bmachinery\b",
-            r"\bequipment\b", r"\bvehicle\b", r"\bcomputer\b", r"\blaptop\b",
-            r"\bfurniture\b", r"\bair\s*conditioner\b", r"\bbuilding\b",
+            r"\bpurchase of\b", r"\bacquisition\b",
+            # "machinery" — exclude shop names like "MACHINERY STORE", "MACHINE TOOLS"
+            r"\b(?:purchase|bought|acquired|new)\s+(?:of\s+)?machinery\b",
+            r"\bmachinery\s+(?:purchase|bought|acquired|cost)\b",
+            # "equipment" — exclude company names like "BALA EQUIPMENTS"
+            r"\b(?:purchase|bought|acquired|new)\s+(?:of\s+)?equipments?\b",
+            r"\bequipments?\s+(?:purchase|bought|acquired|cost)\b",
+            # "vehicle" — exclude "VEHICLE NO." references and repair/consumable contexts
+            r"\b(?:purchase|bought|acquired|new)\s+(?:of\s+)?vehicles?\b",
+            r"\bvehicles?\s+(?:purchase|bought|acquired|cost)\b",
+            r"\bcomputer\b", r"\blaptop\b",
+            r"\bfurniture\b", r"\bair\s*conditioner\b",
+            # "building" — exclude company names like "DEEP BUILDING MATERIAL"
+            r"\b(?:purchase|construction|acquired)\s+(?:of\s+)?building\b",
+            r"\bbuilding\s+(?:purchase|construction|cost|work)\b",
             r"\bfixed\s+asset\b", r"\bcapital\s+(?:asset|goods|item)\b",
         ],
         # BUG 5 FIX: Removed \bac\b (too short, matches "account")
@@ -81,6 +106,15 @@ CATEGORIES = [
             r"\blease\s+(?:rent|payment|amount)\b", r"\blicense fee\b",
             r"\bmonthly\s+rent\b",
             r"\brent(?:ed|ing)?\s+(?:office|shop|warehouse|godown|premises|space|room|flat|house)\b",
+            # Construction/site equipment rent (Poclain, JCB, machine, crane, etc.)
+            # Allow words between equipment name and "rent" (e.g. "JCB June Month rent")
+            r"\b(?:poclain|jcb|crane|excavator|hydra|loader|mixer|generator|d\.?g\.?|dg|machine|binding\s+machine|exhaust\s+fan)\b.{0,40}\brent\b",
+            r"\brent\s+(?:for|of)\b",  # generic "rent for/of"
+            r"\bhire\s+(?:charges?|rent)\b", r"\b(?:on|for)\s+hire\b",
+            r"\broom\s+rent\b",  # room rent
+            # "for Rent" or "Rent ... Days" — standalone rent with context
+            r"\bfor\s+rent\b", r"\brent\s+\d+\s+days?\b",
+            r"\bpathak\s+dg\b.{0,20}\brent\b",  # Pathak DG rent
         ],
         "comment": "Rent payment - verify TDS u/s 194I, GST RCM if applicable",
         "severity": "LOW",
@@ -88,11 +122,12 @@ CATEGORIES = [
     {
         "name": "Professional/Consultancy",
         "patterns": [
-            r"\bprofessional\s+(?:fee|charge|service)\b",
-            r"\bconsultancy\b", r"\bconsulting\b",  # BUG 7 FIX: added consulting
-            r"\blegal\s+(?:fee|charge|service|expense)\b",
-            r"\baudit\s*fee\b", r"\bca\s+fee\b", r"\bcs\s+fee\b",
+            r"\bprofessional\s+(?:fees?|charges?|services?)\b",  # fees plural
+            r"\bconsultancy\b", r"\bconsulting\b", r"\bconsultants?\b",  # consultant/consultants
+            r"\blegal\s+(?:fees?|charges?|services?|expenses?)\b",
+            r"\baudit\s*fees?\b", r"\bca\s+fees?\b", r"\bcs\s+fees?\b",
             r"\badvocate\b", r"\blawyer\b", r"\badvisory\b",
+            r"\binternal\s+audit\b",
         ],
         "comment": "Professional fee - verify TDS u/s 194J",
         "severity": "LOW",
@@ -101,9 +136,8 @@ CATEGORIES = [
         "name": "Contractor Payments",
         "patterns": [
             r"\bcontractor\b", r"\bsub-contractor\b",
-            r"\blabour\s+(?:charges?|cost|payment|work|contract|worker|chowk)\b",
-            r"\b(?:paid|payment)\s+(?:to|for)\s+labour\b",
-            r"\b\d+\s+(?:labour|worker|painter|mason|carpenter|plumber|electrician)\s+worker\b",
+            # "labour" — broader matching: loading labour, labour at, etc.
+            r"\blabour\b",
             r"\bworks contract\b", r"\bjob work\b", r"\bfabrication\b",
             r"\bconstruction\s+(?:work|site|charge|cost|material)\b",
         ],
@@ -136,7 +170,10 @@ CATEGORIES = [
         "name": "Inter-company/Branch",
         "patterns": [
             r"\binter[\s-]?company\b", r"\bbranch\s+transfer\b",
-            r"\bhead\s+office\b", r"\binter[\s-]?unit\b",
+            # "head office" — only flag when combined with transfer/trf, not salary/payment location
+            r"\b(?:transfer|trf)\s+(?:to|from|for)\s+head\s+office\b",
+            r"\bhead\s+office\s+(?:transfer|trf)\b",
+            r"\binter[\s-]?unit\b",
             r"\b(?:transfer\s+(?:to|from)\s+)?branch\s+(?:office|unit|location)\b",
             # BUG 4 FIX: removed standalone \bbranch\b and \bho\b (matches bank ATM branches)
         ],
@@ -146,7 +183,10 @@ CATEGORIES = [
     {
         "name": "Reversal/Correction",
         "patterns": [
-            r"\breversal\b", r"\breversed\b", r"\bcorrection\b",
+            r"\breversal\b", r"\breversed\b",
+            # "correction" — require accounting context, exclude "registration & correction"
+            r"\bcorrection\s+(?:entry|entries|voucher|journal|of\s+entry)\b",
+            r"\b(?:entry|entries|voucher|journal)\s+correction\b",
             r"\brectification\b", r"\bmistake\b",
             r"\bwrong\s+entry\b", r"\bentry\s+(?:reversed|corrected)\b",
             # Removed \berror\b (too generic) and \badjusted\b (too generic)
