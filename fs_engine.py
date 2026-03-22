@@ -682,10 +682,12 @@ class ScheduleIIIClassifier:
 
     def _init_classification_rules(self):
         """Initialize Tally group to Schedule III mapping rules"""
-        # This is the master mapping rule set
+        # This is the master mapping rule set — includes ALL standard Tally groups.
+        # Custom sub-groups are resolved via hierarchy walk-up in _resolve_group_rule().
         self.classification_rules = {
             # EQUITY & RESERVES
             "Capital Account": (ScheduleIIISection.BS_EQUITY, "share_capital", "paid_up"),
+            "Share Capital Account": (ScheduleIIISection.BS_EQUITY, "share_capital", "paid_up"),
             "Reserves & Surplus": (ScheduleIIISection.BS_EQUITY, "other_equity", "reserves_surplus"),
 
             # ASSETS - Non-Current
@@ -693,6 +695,7 @@ class ScheduleIIIClassifier:
             "Investments": (ScheduleIIISection.BS_NONICA, "financial_assets", "investments"),
 
             # ASSETS - Current
+            "Current Assets": (ScheduleIIISection.BS_CA, "other_current_assets", ""),
             "Bank Accounts": (ScheduleIIISection.BS_CA, "financial_assets_ca", "cash"),
             "Cash-in-Hand": (ScheduleIIISection.BS_CA, "financial_assets_ca", "cash"),
             "Stock-in-Hand": (ScheduleIIISection.BS_CA, "inventories", "finished_goods"),
@@ -715,16 +718,48 @@ class ScheduleIIIClassifier:
             # P&L - REVENUE
             "Sales Accounts": (ScheduleIIISection.PL_REVENUE, "revenue_operations", "sale_products"),
             "Direct Incomes": (ScheduleIIISection.PL_REVENUE, "other_income", ""),
+            "Indirect Incomes": (ScheduleIIISection.PL_REVENUE, "other_income", ""),
 
             # P&L - EXPENSES
             "Purchase Accounts": (ScheduleIIISection.PL_EXPENSE, "purchases_changes", ""),
             "Direct Expenses": (ScheduleIIISection.PL_EXPENSE, "cost_materials", ""),
             "Indirect Expenses": (ScheduleIIISection.PL_EXPENSE, "other_expenses", ""),
-            "Indirect Incomes": (ScheduleIIISection.PL_REVENUE, "other_income", ""),
+            "Manufacturing Expenses": (ScheduleIIISection.PL_EXPENSE, "cost_materials", ""),
 
             # SPECIAL
             "Suspense A/c": (None, None, None),  # Handled separately
+            "Misc. Expenses (ASSET)": (ScheduleIIISection.BS_CA, "other_current_assets", ""),
+            "Branch / Divisions": (ScheduleIIISection.BS_CA, "other_current_assets", ""),
         }
+
+    def _resolve_group_rule(self, group_name: str) -> Optional[tuple]:
+        """
+        Resolve classification rule for a group by walking up the hierarchy.
+
+        If the group is directly in classification_rules, return that rule.
+        Otherwise, walk up through parent groups until a recognized standard
+        group is found or we hit "Primary" (root).
+
+        Args:
+            group_name: Name of the Tally group to resolve
+
+        Returns:
+            Tuple of (ScheduleIIISection, line_item, sub_item) or None if unresolvable
+        """
+        visited = set()
+        current = group_name
+        while current and current != "Primary" and current not in visited:
+            visited.add(current)
+            rule = self.classification_rules.get(current)
+            if rule is not None:
+                return rule
+            # Walk up to parent
+            group_node = self.extractor.group_tree.get(current)
+            if group_node:
+                current = group_node.parent
+            else:
+                break
+        return None
 
     def classify_all(self) -> List[ClassifiedLedger]:
         """
@@ -849,8 +884,8 @@ class ScheduleIIIClassifier:
                     reclassification_note="Suspense A/c (Debit balance) classified as Current Asset",
                 )
 
-        # Get classification rule for parent group
-        rule = self.classification_rules.get(ledger.parent_group)
+        # Get classification rule — walk up group hierarchy for custom sub-groups
+        rule = self._resolve_group_rule(ledger.parent_group)
         if not rule or rule[0] is None:
             return None
 
@@ -888,9 +923,11 @@ class ScheduleIIIClassifier:
             is_reclassified = True
             reclassification_note = "Sundry Debtor with credit balance reclassified to Advances from Customers"
 
-        # RULE 3: Indirect Expenses - sub-classify by name
-        elif schedule_line == "other_expenses":
-            classified_sub = self._classify_indirect_expense(ledger.name)
+        # RULE 3: P&L Expenses - granular sub-classification by group name and ledger name
+        elif schedule_section == ScheduleIIISection.PL_EXPENSE:
+            granular = self._classify_pl_expense(ledger.name, ledger.parent_group)
+            if granular:
+                classified_line, classified_sub = granular
 
         # RULE 4: Trade Receivables - identify MSME
         elif schedule_line == "trade_receivables":
@@ -923,27 +960,83 @@ class ScheduleIIIClassifier:
             reclassification_note=reclassification_note,
         )
 
-    def _classify_indirect_expense(self, ledger_name: str) -> str:
+    def _classify_pl_expense(self, ledger_name: str, parent_group: str) -> Optional[Tuple[str, str]]:
         """
-        Sub-classify Indirect Expense ledgers by name matching.
+        Granular P&L expense classification based on ledger name AND parent group name.
+
+        Walks up the group hierarchy to gather all ancestor group names for context,
+        then uses keyword matching on both ledger name and group ancestry.
 
         Returns:
-            "finance_costs", "depreciation", or "other_expenses"
+            Tuple of (schedule_iii_line, schedule_iii_sub) or None to keep defaults
         """
         name_lower = ledger_name.lower()
 
-        finance_keywords = ["interest", "bank charge", "bank od interest", "processing fee", "loan processing"]
+        # Collect all ancestor group names for context matching
+        group_context = set()
+        current = parent_group
+        visited = set()
+        while current and current != "Primary" and current not in visited:
+            visited.add(current)
+            group_context.add(current.lower())
+            node = self.extractor.group_tree.get(current)
+            if node:
+                current = node.parent
+            else:
+                break
+
+        # Combined context: ledger name + all ancestor group names
+        all_context = name_lower + " " + " ".join(group_context)
+
+        # 1. Employee benefit expenses (salary, wages, staff, bonus, gratuity, PF, ESI)
+        employee_keywords = [
+            "salary", "salaries", "wages", "staff", "bonus", "gratuity",
+            "provident fund", "pf contribution", "esi", "employee",
+            "leave encashment", "incentive", "stipend",
+        ]
+        for kw in employee_keywords:
+            if kw in all_context:
+                return ("employee_benefits", "")
+
+        # 2. Depreciation and amortization
         depreciation_keywords = ["depreciation", "amortization", "amortisation"]
+        for kw in depreciation_keywords:
+            if kw in all_context:
+                return ("depreciation", "depreciation")
 
-        for keyword in finance_keywords:
-            if keyword in name_lower:
-                return "finance_costs"
+        # 3. Finance costs (interest, bank charges, loan processing)
+        finance_keywords = [
+            "interest", "bank charge", "bank od interest", "processing fee",
+            "loan processing", "finance cost", "finance charge",
+        ]
+        for kw in finance_keywords:
+            if kw in all_context:
+                return ("finance_costs", "")
 
-        for keyword in depreciation_keywords:
-            if keyword in name_lower:
-                return "depreciation"
+        # 4. Job work / contract expenses
+        jobwork_keywords = ["job work", "jobwork", "contract", "sub-contract", "subcontract", "labour"]
+        for kw in jobwork_keywords:
+            if kw in all_context:
+                return ("other_expenses", "job_work")
 
-        return "other"
+        # 5. Rent expenses
+        rent_keywords = ["rent", "lease rental"]
+        for kw in rent_keywords:
+            if kw in all_context:
+                return ("other_expenses", "rent")
+
+        # 6. Advertisement / marketing / online expenses
+        ad_keywords = ["online", "advertisement", "marketing", "promotion", "digital", "seo"]
+        for kw in ad_keywords:
+            if kw in all_context:
+                return ("other_expenses", "advertisement")
+
+        # 7. Purchase accounts stay as purchases_changes (don't override)
+        if any(kw in all_context for kw in ["purchase"]):
+            return None  # Keep default from rule
+
+        # Default: keep the line from the classification rule
+        return None
 
     def get_classified_by_section(self, section: ScheduleIIISection) -> List[ClassifiedLedger]:
         """Get all classified ledgers in a specific Schedule III section"""
@@ -1297,8 +1390,14 @@ class ReconciliationEngine:
     def _check_balance_sheet_equation(self) -> VerificationCheck:
         """
         CHECK 3: Balance Sheet Equation
-        Assets = Liabilities + Equity
+        Uses Tally's sign convention: sum of ALL BS section closing balances = 0.
+        (Credit-positive: Liabilities/Equity positive, Assets negative)
+        Assets (abs) = Liabilities + Equity (abs)
         """
+        # Sum signed closing balances for all BS sections
+        # In Tally: Assets = negative (debit), Liabilities/Equity = positive (credit)
+        # If balanced, sum of all BS closing_balance = 0
+        bs_sum = Decimal(0)
         total_assets = Decimal(0)
         total_liabilities = Decimal(0)
         total_equity = Decimal(0)
@@ -1308,27 +1407,29 @@ class ReconciliationEngine:
                 ScheduleIIISection.BS_NONICA,
                 ScheduleIIISection.BS_CA,
             ):
-                total_assets += classified.display_amount
+                bs_sum += classified.closing_balance
+                total_assets += abs(classified.closing_balance)
             elif classified.schedule_iii_section in (
                 ScheduleIIISection.BS_NONCL,
                 ScheduleIIISection.BS_CL,
             ):
-                total_liabilities += classified.display_amount
+                bs_sum += classified.closing_balance
+                total_liabilities += abs(classified.closing_balance)
             elif classified.schedule_iii_section == ScheduleIIISection.BS_EQUITY:
-                total_equity += classified.display_amount
+                bs_sum += classified.closing_balance
+                total_equity += abs(classified.closing_balance)
 
-        expected = total_liabilities + total_equity
-        difference = abs(total_assets - expected)
+        difference = abs(bs_sum)
         status = "PASS" if difference < Decimal("1") else "FAIL"
 
         return VerificationCheck(
             check_name="Balance Sheet Equation",
-            expected=expected,
-            actual=total_assets,
+            expected=Decimal(0),
+            actual=bs_sum,
             difference=difference,
             status=status,
             details=f"Assets: {total_assets}, Liabilities: {total_liabilities}, "
-                    f"Equity: {total_equity}. Expected A=L+E: {expected}",
+                    f"Equity: {total_equity}. BS signed sum: {bs_sum}",
             severity="CRITICAL" if status == "FAIL" else "INFO",
         )
 
