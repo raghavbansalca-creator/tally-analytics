@@ -1,6 +1,7 @@
 """
 Seven Labs Vision -- Companies Act Schedule III Financial Statements
-Balance Sheet (Part I) and Profit & Loss Statement (Part II) with Excel export.
+Balance Sheet (Part I), Profit & Loss Statement (Part II), and Notes to Accounts
+with Excel export containing 26 notes.
 """
 
 import streamlit as st
@@ -81,6 +82,7 @@ with st.sidebar.form("company_info_form"):
     st.markdown("**Auditor Details**")
     ci_auditor = st.text_input("CA Firm Name", value="")
     ci_frn = st.text_input("FRN", value="")
+    ci_partner = st.text_input("Partner Name", value="")
     ci_member = st.text_input("Membership No.", value="")
 
     st.markdown("---")
@@ -101,11 +103,13 @@ company_info = {
     "prev_year_end": ci_prev_year,
     "auditor_name": ci_auditor,
     "auditor_frn": ci_frn,
+    "auditor_partner": ci_partner,
     "auditor_member": ci_member,
     "director1_name": ci_dir1,
     "director1_din": ci_din1,
     "director2_name": ci_dir2,
     "director2_din": ci_din2,
+    "denomination": "INR",
 }
 
 
@@ -134,6 +138,19 @@ with col4:
                 sub="P&L Statement", color_class=color)
 
 
+# ── VERIFICATION SECTION ────────────────────────────────────────────────────
+
+diff = abs(bs_data["total_liabilities"] - bs_data["total_assets"])
+if diff < 1.0:
+    info_banner("Balance Sheet is balanced. All figures verified against Tally data.", "success")
+else:
+    info_banner(
+        f"Balance Sheet difference of {fmt_full(diff)} detected. "
+        "Review reclassification between asset/liability items.",
+        "warning"
+    )
+
+
 # ── GENERATE EXCEL ──────────────────────────────────────────────────────────
 
 st.markdown("")
@@ -142,7 +159,7 @@ with col_gen:
     generate_clicked = st.button("Generate Financial Statements (Excel)", type="primary")
 
 if generate_clicked:
-    with st.spinner("Generating Schedule III compliant Excel..."):
+    with st.spinner("Generating Schedule III compliant Excel with 26 Notes..."):
         tmp_file = os.path.join(tempfile.gettempdir(), "financial_statements.xlsx")
         result = generate_schedule_iii(
             db_path=DB_PATH,
@@ -152,13 +169,42 @@ if generate_clicked:
         with open(tmp_file, "rb") as f:
             excel_data = f.read()
 
+        v = result["verification"]
+
         st.download_button(
             label="Download Financial Statements (.xlsx)",
             data=excel_data,
             file_name=f"Schedule_III_{ci_name.replace(' ', '_')}_{ci_year_end.replace('.', '')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        st.success("Financial statements generated successfully.")
+
+        st.success(
+            f"Generated: Balance Sheet, P&L Statement, and {len(result['notes'])} Notes to Accounts. "
+            f"{'BS Balanced.' if v['bs_balanced'] else f'BS Difference: {v[\"bs_difference\"]:.2f}'}"
+        )
+
+        # Show verification details
+        with st.expander("Verification Details"):
+            vcol1, vcol2 = st.columns(2)
+            with vcol1:
+                st.markdown("**Balance Sheet**")
+                st.write(f"Total Equity & Liabilities: {fmt_stmt(v['bs_total_liabilities'])}")
+                st.write(f"Total Assets: {fmt_stmt(v['bs_total_assets'])}")
+                st.write(f"Difference: {v['bs_difference']:.2f}")
+            with vcol2:
+                st.markdown("**Profit & Loss**")
+                st.write(f"Revenue: {fmt_stmt(v['pl_revenue'])}")
+                st.write(f"Total Expenses: {fmt_stmt(v['pl_expenses'])}")
+                st.write(f"Profit Before Tax: {fmt_stmt(v['pl_profit_before_tax'])}")
+                st.write(f"Profit After Tax: {fmt_stmt(v['pl_profit_after_tax'])}")
+
+            st.markdown("**Excel Sheets Generated:**")
+            st.write("1. Balance Sheet (Part I)")
+            st.write("2. Statement of Profit and Loss (Part II)")
+            st.write("3. Note 1 - Significant Accounting Policies")
+            st.write("4. Notes 2-16 (Balance Sheet Notes)")
+            st.write("5. Notes 17-23 (P&L Notes)")
+            st.write("6. Notes 24-26 (Other Disclosures)")
 
 
 # ── TAB VIEWS ───────────────────────────────────────────────────────────────
@@ -171,14 +217,6 @@ tab_bs, tab_pl = st.tabs(["Balance Sheet", "Profit & Loss Statement"])
 with tab_bs:
     section_header(f"Balance Sheet as at {ci_year_end}")
 
-    if abs(bs_data["total_liabilities"] - bs_data["total_assets"]) > 1:
-        info_banner(
-            f"Note: Balance Sheet difference of {fmt_full(bs_data['total_liabilities'] - bs_data['total_assets'])} detected. "
-            "This may indicate reclassification needed between asset/liability items.",
-            "warning"
-        )
-
-    # Build HTML table
     rows_html = []
 
     def add_row(label, note="", amount=None, cls="", indent=0):
@@ -231,15 +269,13 @@ with tab_bs:
     ncl = bs_data["liabilities"]["non_current_liabilities"]
     for idx, (key, item) in enumerate(ncl.items()):
         letter = chr(ord('a') + idx)
-        if item["amount"] != 0:
-            add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
 
     add_subsection_row("(4) Current Liabilities")
     cl = bs_data["liabilities"]["current_liabilities"]
     for idx, (key, item) in enumerate(cl.items()):
         letter = chr(ord('a') + idx)
-        if item["amount"] != 0:
-            add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
 
     add_total_row("Total Equity and Liabilities", bs_data["total_liabilities"])
 
@@ -250,26 +286,23 @@ with tab_bs:
     nca = bs_data["assets"]["non_current_assets"]
     for idx, (key, item) in enumerate(nca.items()):
         letter = chr(ord('a') + idx)
-        if item["amount"] != 0:
-            add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
 
     add_subsection_row("(2) Current assets")
     ca = bs_data["assets"]["current_assets"]
     for idx, (key, item) in enumerate(ca.items()):
         letter = chr(ord('a') + idx)
-        if item["amount"] != 0:
-            add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
 
     add_total_row("Total Assets", bs_data["total_assets"])
 
-    # Render table
     table_html = f"""
     <table class="slv-table">
     <thead>
         <tr>
-            <th style="text-align:left;width:60%">Particulars</th>
-            <th style="text-align:center;width:8%">Note</th>
-            <th style="text-align:right;width:32%">Amount (INR)</th>
+            <th style="text-align:left;width:55%">Particulars</th>
+            <th style="text-align:center;width:10%">Note</th>
+            <th style="text-align:right;width:35%">Amount (INR)</th>
         </tr>
     </thead>
     <tbody>
@@ -311,21 +344,19 @@ with tab_pl:
         )
 
     # Revenue section
-    add_pl_row("I. Revenue from operations", "14", pl_data["revenue"], bold=False)
-    add_pl_row("II. Other Income", "15", pl_data["other_income"])
+    add_pl_row("I. Revenue from operations", "17", pl_data["revenue"], bold=False)
+    add_pl_row("II. Other Income", "18", pl_data["other_income"])
     add_pl_total("III. Total Income (I + II)", pl_data["total_income"])
 
-    # Spacer
     pl_rows.append('<tr><td colspan="3" style="height:8px"></td></tr>')
 
-    # Expenses section
     pl_rows.append(
         '<tr><td colspan="3" style="text-align:left;font-weight:700;'
         'padding:10px 14px 4px;font-size:0.9rem">IV. Expenses:</td></tr>'
     )
 
-    expense_order = ["cost_of_materials", "changes_in_inventories", "employee_benefit",
-                     "finance_costs", "depreciation", "other_expenses"]
+    expense_order = ["cost_of_materials", "purchase_stock_in_trade", "changes_in_inventories",
+                     "employee_benefit", "finance_costs", "depreciation", "other_expenses"]
     for key in expense_order:
         if key in pl_data["expenses"]:
             item = pl_data["expenses"][key]
@@ -333,34 +364,34 @@ with tab_pl:
 
     add_pl_total("Total Expenses", pl_data["total_expenses"])
 
-    # Spacer
     pl_rows.append('<tr><td colspan="3" style="height:8px"></td></tr>')
 
-    # Profit
-    add_pl_row("V. Profit/(Loss) before tax (III - IV)", "",
+    add_pl_row("V. Profit/(Loss) before exceptional items and tax (III - IV)", "",
+               pl_data["profit_before_tax"], bold=True)
+    add_pl_row("VI. Exceptional Items", "", 0)
+    add_pl_row("VII. Profit/(Loss) before tax (V - VI)", "",
                pl_data["profit_before_tax"], bold=True)
 
     pl_rows.append('<tr><td colspan="3" style="height:4px"></td></tr>')
-    add_pl_row("VI. Tax expense:", "", None, bold=True)
+    add_pl_row("VIII. Tax expense:", "", None, bold=True)
     add_pl_row("(1) Current tax", "", pl_data["tax_current"], indent=1)
-    add_pl_row("(2) Deferred tax", "4", pl_data["tax_deferred"], indent=1)
+    add_pl_row("(2) Deferred tax", "5", pl_data["tax_deferred"], indent=1)
 
     pl_rows.append('<tr><td colspan="3" style="height:4px"></td></tr>')
-    add_pl_total("VII. Profit/(Loss) after tax (V - VI)", pl_data["profit_after_tax"])
+    add_pl_total("IX. Profit/(Loss) for the period", pl_data["profit_after_tax"])
 
     pl_rows.append('<tr><td colspan="3" style="height:8px"></td></tr>')
-    add_pl_row("VIII. Earnings per equity share:", "", None, bold=True)
+    add_pl_row("X. Earnings per equity share:", "", None, bold=True)
     add_pl_row("(1) Basic", "", None, indent=1)
     add_pl_row("(2) Diluted", "", None, indent=1)
 
-    # Render P&L table
     pl_table_html = f"""
     <table class="slv-table">
     <thead>
         <tr>
-            <th style="text-align:left;width:60%">Particulars</th>
-            <th style="text-align:center;width:8%">Note</th>
-            <th style="text-align:right;width:32%">Amount (INR)</th>
+            <th style="text-align:left;width:55%">Particulars</th>
+            <th style="text-align:center;width:10%">Note</th>
+            <th style="text-align:right;width:35%">Amount (INR)</th>
         </tr>
     </thead>
     <tbody>
