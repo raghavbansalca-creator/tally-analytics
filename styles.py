@@ -716,4 +716,3 @@ def sidebar_company_card(name, entity_type="", business_nature="", complexity=""
 def sidebar_section_label(text):
     """Render a section label in the sidebar (e.g., DASHBOARDS, COMPLIANCE)."""
     st.sidebar.markdown(f'<p class="sidebar-section-label">{text}</p>', unsafe_allow_html=True)
-/* UI fix 1774135560 */
