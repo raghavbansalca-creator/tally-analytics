@@ -11,6 +11,13 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from narration_engine import analyze_all_narrations, export_narration_report
+
+# New multi-layer pipeline (group-context + bank parser + regex)
+try:
+    from narration_classifier import classify_all as pipeline_classify_all
+    PIPELINE_AVAILABLE = True
+except ImportError:
+    PIPELINE_AVAILABLE = False
 from styles import (
     inject_base_styles, page_header, section_header, metric_card,
     badge, footer, fmt, fmt_full,
@@ -84,6 +91,16 @@ page_header("Narration Audit", f"Auto-classify voucher narrations and flag audit
 
 if "narration_results" not in st.session_state:
     st.session_state.narration_results = None
+
+
+# -- Pipeline info banner -----------------------------------------------------
+
+if PIPELINE_AVAILABLE:
+    st.info(
+        "**New: Multi-Layer Engine active.** This page uses the original regex-only analysis. "
+        "For the enhanced Group vs Narration cross-check (with misclassification detection), "
+        "go to **Narration Cross-Check** page in the sidebar."
+    )
 
 
 # -- Run button ---------------------------------------------------------------
