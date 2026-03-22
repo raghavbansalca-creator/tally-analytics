@@ -908,7 +908,7 @@ insights = []
 # Sales trend
 first_3_avg = sum(m["sales"] for m in pnl[:3]) / 3
 last_3_avg = sum(m["sales"] for m in pnl[-3:]) / 3
-sales_trend_pct = ((last_3_avg - first_3_avg) / first_3_avg * 100)
+sales_trend_pct = ((last_3_avg - first_3_avg) / first_3_avg * 100) if first_3_avg else 0
 if sales_trend_pct < -10:
     insights.append(f"WARN **Sales declining**: Average monthly sales dropped {abs(sales_trend_pct):.0f}% from first 3 months ({fmt_inr(first_3_avg)}/month) to last 3 months ({fmt_inr(last_3_avg)}/month)")
 elif sales_trend_pct > 10:

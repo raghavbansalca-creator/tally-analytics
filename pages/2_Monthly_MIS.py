@@ -1124,7 +1124,7 @@ def main():
         st.markdown(conc_html, unsafe_allow_html=True)
 
         # Customer drill buttons
-        cust_cols = st.columns(min(len(data["top5_customers"]), 5))
+        cust_cols = st.columns(max(min(len(data["top5_customers"]), 5), 1))
         for idx_c, (cust, amt) in enumerate(data["top5_customers"]):
             short = cust[:18] + ".." if len(cust) > 18 else cust
             with cust_cols[idx_c]:
