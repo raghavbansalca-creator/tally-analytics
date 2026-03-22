@@ -178,9 +178,10 @@ if generate_clicked:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+        bs_msg = "BS Balanced." if v['bs_balanced'] else "BS Difference: {:.2f}".format(v['bs_difference'])
         st.success(
-            f"Generated: Balance Sheet, P&L Statement, and {len(result['notes'])} Notes to Accounts. "
-            f"{'BS Balanced.' if v['bs_balanced'] else f'BS Difference: {v[\"bs_difference\"]:.2f}'}"
+            "Generated: Balance Sheet, P&L Statement, and {} Notes to Accounts. {}".format(
+                len(result['notes']), bs_msg)
         )
 
         # Show verification details
