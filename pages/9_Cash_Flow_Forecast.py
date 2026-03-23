@@ -682,7 +682,7 @@ if len(forecasts) > 1:
     tabs = st.tabs(tab_names)
     tab_map = dict(zip(forecasts.keys(), tabs))
 else:
-    tab_map = {list(forecasts.keys())[0]: st} if forecasts else {}
+    tab_map = {list(forecasts.keys())[0]: st.container()} if forecasts else {}
 
 for sc_name, container in tab_map.items():
     fc_result = forecasts[sc_name]
