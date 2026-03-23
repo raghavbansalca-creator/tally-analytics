@@ -409,17 +409,44 @@ def _mismatch_severity(group_category, narration_category):
 
 def classify_all(db_path, from_date=None, to_date=None):
     """Classify ALL vouchers in the database using the full pipeline.
+    DEFENSIVE: Handles missing tables, empty data. Never crashes.
 
     Returns:
         dict with:
             results: list of classification results per voucher
             stats: summary statistics
-            comparison: regex-only vs pipeline accuracy comparison
     """
-    conn = sqlite3.connect(db_path)
+    _empty_result = {
+        "results": [],
+        "stats": {
+            "total": 0, "by_method": {}, "by_category": {}, "by_verdict": {},
+            "needs_review": 0, "cross_check_mismatches": 0,
+            "high_severity_mismatches": 0, "group_narration_disagreements": 0,
+            "no_narration": 0, "bank_narrations": 0,
+        },
+    }
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return _empty_result
     conn.row_factory = sqlite3.Row
 
-    ledger_group_map = build_ledger_group_map(conn)
+    # Check required tables exist
+    try:
+        tbl_check = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='trn_voucher'"
+        ).fetchone()
+        if not tbl_check or tbl_check[0] == 0:
+            conn.close()
+            return _empty_result
+    except Exception:
+        conn.close()
+        return _empty_result
+
+    try:
+        ledger_group_map = build_ledger_group_map(conn)
+    except Exception:
+        ledger_group_map = {}
     ledger_names = list(ledger_group_map.keys())
 
     # Date filter

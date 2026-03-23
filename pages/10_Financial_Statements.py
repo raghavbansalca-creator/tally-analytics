@@ -47,10 +47,14 @@ def fmt_stmt_short(amount):
 
 # ── LOAD DATA ───────────────────────────────────────────────────────────────
 
-conn = _get_conn()
-metadata = _get_metadata(conn)
-company_name = metadata.get("company_name", "Company")
-conn.close()
+try:
+    conn = _get_conn()
+    metadata = _get_metadata(conn)
+    company_name = metadata.get("company_name", "Company")
+    conn.close()
+except Exception:
+    metadata = {}
+    company_name = "Company"
 
 
 # ── PAGE HEADER ─────────────────────────────────────────────────────────────
@@ -115,32 +119,46 @@ company_info = {
 
 # ── LOAD FINANCIAL DATA ────────────────────────────────────────────────────
 
-bs_data = get_bs_preview_data()
-pl_data = get_pl_preview_data()
+try:
+    bs_data = get_bs_preview_data()
+    pl_data = get_pl_preview_data()
+except Exception as e:
+    st.error(f"Failed to load financial data: {e}")
+    bs_data = {"total_assets": 0.0, "total_liabilities": 0.0,
+               "liabilities": {}, "assets": {}}
+    pl_data = {"revenue": 0.0, "other_income": 0.0, "total_income": 0.0,
+               "expenses": {}, "total_expenses": 0.0,
+               "profit_before_tax": 0.0, "tax_current": 0.0,
+               "tax_deferred": 0.0, "profit_after_tax": 0.0}
 
 
 # ── SUMMARY METRICS ─────────────────────────────────────────────────────────
 
+total_assets = bs_data.get("total_assets", 0) or 0
+total_liabilities = bs_data.get("total_liabilities", 0) or 0
+revenue = pl_data.get("revenue", 0) or 0
+pbt = pl_data.get("profit_before_tax", 0) or 0
+
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    metric_card("Total Assets", fmt_stmt_short(bs_data["total_assets"]),
+    metric_card("Total Assets", fmt_stmt_short(total_assets),
                 sub="Balance Sheet", color_class="blue")
 with col2:
-    metric_card("Total Equity & Liabilities", fmt_stmt_short(bs_data["total_liabilities"]),
+    metric_card("Total Equity & Liabilities", fmt_stmt_short(total_liabilities),
                 sub="Balance Sheet", color_class="purple")
 with col3:
-    metric_card("Revenue", fmt_stmt_short(pl_data["revenue"]),
+    metric_card("Revenue", fmt_stmt_short(revenue),
                 sub="From Operations", color_class="green")
 with col4:
-    color = "green" if pl_data["profit_before_tax"] >= 0 else "red"
-    label = "Profit" if pl_data["profit_before_tax"] >= 0 else "Loss"
-    metric_card(f"{label} Before Tax", fmt_stmt_short(pl_data["profit_before_tax"]),
+    color = "green" if pbt >= 0 else "red"
+    label = "Profit" if pbt >= 0 else "Loss"
+    metric_card(f"{label} Before Tax", fmt_stmt_short(pbt),
                 sub="P&L Statement", color_class=color)
 
 
 # ── VERIFICATION SECTION ────────────────────────────────────────────────────
 
-diff = abs(bs_data["total_liabilities"] - bs_data["total_assets"])
+diff = abs(total_liabilities - total_assets)
 if diff < 1.0:
     info_banner("Balance Sheet is balanced. All figures verified against Tally data.", "success")
 else:
@@ -259,43 +277,43 @@ with tab_bs:
     add_section_row("I. EQUITY AND LIABILITIES")
 
     add_subsection_row("(1) Shareholder's Funds")
-    sf = bs_data["liabilities"]["shareholders_funds"]
+    sf = bs_data.get("liabilities", {}).get("shareholders_funds", {})
     for idx, (key, item) in enumerate(sf.items()):
         letter = chr(ord('a') + idx)
-        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item.get('label', key)}", item.get("note", ""), item.get("amount", 0), indent=2)
 
     add_subsection_row("(2) Share application money pending allotment")
 
     add_subsection_row("(3) Non-Current Liabilities")
-    ncl = bs_data["liabilities"]["non_current_liabilities"]
+    ncl = bs_data.get("liabilities", {}).get("non_current_liabilities", {})
     for idx, (key, item) in enumerate(ncl.items()):
         letter = chr(ord('a') + idx)
-        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item.get('label', key)}", item.get("note", ""), item.get("amount", 0), indent=2)
 
     add_subsection_row("(4) Current Liabilities")
-    cl = bs_data["liabilities"]["current_liabilities"]
+    cl = bs_data.get("liabilities", {}).get("current_liabilities", {})
     for idx, (key, item) in enumerate(cl.items()):
         letter = chr(ord('a') + idx)
-        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item.get('label', key)}", item.get("note", ""), item.get("amount", 0), indent=2)
 
-    add_total_row("Total Equity and Liabilities", bs_data["total_liabilities"])
+    add_total_row("Total Equity and Liabilities", total_liabilities)
 
     # II. ASSETS
     add_section_row("II. ASSETS")
 
     add_subsection_row("(1) Non-current assets")
-    nca = bs_data["assets"]["non_current_assets"]
+    nca = bs_data.get("assets", {}).get("non_current_assets", {})
     for idx, (key, item) in enumerate(nca.items()):
         letter = chr(ord('a') + idx)
-        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item.get('label', key)}", item.get("note", ""), item.get("amount", 0), indent=2)
 
     add_subsection_row("(2) Current assets")
-    ca = bs_data["assets"]["current_assets"]
+    ca = bs_data.get("assets", {}).get("current_assets", {})
     for idx, (key, item) in enumerate(ca.items()):
         letter = chr(ord('a') + idx)
-        add_row(f"({letter}) {item['label']}", item.get("note", ""), item["amount"], indent=2)
+        add_row(f"({letter}) {item.get('label', key)}", item.get("note", ""), item.get("amount", 0), indent=2)
 
-    add_total_row("Total Assets", bs_data["total_assets"])
+    add_total_row("Total Assets", total_assets)
 
     table_html = f"""
     <table class="slv-table">

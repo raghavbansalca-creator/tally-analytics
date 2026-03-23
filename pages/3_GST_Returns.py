@@ -98,6 +98,31 @@ def _month_label_full(m):
 #  HEADER
 # ======================================================================
 
+def _safe_parse_date(date_str, fallback=None):
+    """Safely parse YYYYMMDD date string."""
+    try:
+        if date_str and len(date_str) >= 8:
+            return datetime.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+    except (ValueError, TypeError):
+        pass
+    return fallback
+
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _safe_div(a, b, default=0):
+    """Safe division."""
+    if not b:
+        return default
+    return a / b
+
+
 conn = get_conn()
 months = get_available_months(conn)
 month_codes = [m[0] for m in months]
@@ -108,8 +133,8 @@ _company_state = _get_company_state(conn)
 # -- GLOBAL DATE FILTER --
 _min_date_row = conn.execute("SELECT MIN(DATE) FROM trn_voucher").fetchone()
 _max_date_row = conn.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
-_min_dt = datetime.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else datetime.date(2025, 4, 1)
-_max_dt = datetime.date(int(_max_date_row[0][:4]), int(_max_date_row[0][4:6]), int(_max_date_row[0][6:8])) if _max_date_row and _max_date_row[0] else datetime.date.today()
+_min_dt = _safe_parse_date(_min_date_row[0] if _min_date_row else None, fallback=datetime.date(2025, 4, 1))
+_max_dt = _safe_parse_date(_max_date_row[0] if _max_date_row else None, fallback=datetime.date.today())
 if "global_start_date" not in st.session_state:
     st.session_state.global_start_date = _min_dt
 if "global_end_date" not in st.session_state:
@@ -139,6 +164,10 @@ page_header("GST Returns Dashboard", _gstin_sub)
 # ======================================================================
 
 section_header("Select Month")
+if not month_codes:
+    st.info("No GST transaction months found in the loaded data.")
+    conn.close()
+    st.stop()
 month_cols = st.columns(len(month_codes))
 for i, mc in enumerate(month_codes):
     label = _month_label(mc)
@@ -489,12 +518,19 @@ elif view == "voucher_detail":
                          gst_back_drill=st.session_state.gst_back_drill)
                     st.rerun()
 
-            # Accounting entries
-            entries = conn.execute("""
-                SELECT LEDGERNAME, CAST(AMOUNT AS REAL) as amount, ISDEEMEDPOSITIVE
-                FROM trn_accounting WHERE VOUCHER_GUID = ?
-                AND (GSTTAXRATE IS NULL OR GSTTAXRATE = '')
-            """, (guid,)).fetchall()
+            # Accounting entries -- safe column check for GSTTAXRATE
+            _acct_cols = _safe_cols(conn, 'trn_accounting')
+            if 'GSTTAXRATE' in _acct_cols:
+                entries = conn.execute("""
+                    SELECT LEDGERNAME, CAST(AMOUNT AS REAL) as amount, ISDEEMEDPOSITIVE
+                    FROM trn_accounting WHERE VOUCHER_GUID = ?
+                    AND (GSTTAXRATE IS NULL OR GSTTAXRATE = '')
+                """, (guid,)).fetchall()
+            else:
+                entries = conn.execute("""
+                    SELECT LEDGERNAME, CAST(AMOUNT AS REAL) as amount, ISDEEMEDPOSITIVE
+                    FROM trn_accounting WHERE VOUCHER_GUID = ?
+                """, (guid,)).fetchall()
 
             section_header("Accounting Entries")
 
@@ -682,14 +718,19 @@ conn.close()
 # ======================================================================
 
 st.markdown("---")
-from chat_engine import ask, format_result_as_text
-chat_input = st.chat_input("Ask anything -- P&L, Balance Sheet, ledger of [party], debtors, creditors...")
-if chat_input:
-    result = ask(chat_input)
-    st.markdown(f"**You:** {chat_input}")
-    if result.get("type") == "chat":
-        st.markdown(result.get("message", ""))
-    else:
-        st.markdown(format_result_as_text(result))
+try:
+    from chat_engine import ask, format_result_as_text
+    chat_input = st.chat_input("Ask anything -- P&L, Balance Sheet, ledger of [party], debtors, creditors...")
+    if chat_input:
+        result = ask(chat_input)
+        st.markdown(f"**You:** {chat_input}")
+        if result.get("type") == "chat":
+            st.markdown(result.get("message", ""))
+        else:
+            st.markdown(format_result_as_text(result))
+except ImportError:
+    pass
+except Exception:
+    pass
 
 footer()

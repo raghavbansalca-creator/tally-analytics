@@ -74,6 +74,21 @@ def _month_label_short(m):
 #  DATA LOAD
 # ======================================================================
 
+def _safe_div(a, b, default=0):
+    """Safe division."""
+    if not b:
+        return default
+    return a / b
+
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
 conn = get_conn()
 company_name = _get_company_name(conn)
 tds_ledgers = _detect_tds_ledgers(conn)
@@ -197,7 +212,7 @@ else:
     sections_covered = len(section_data)
     pan_with = sum(1 for p in pan_data if p["has_pan"])
     pan_total = len(pan_data)
-    pan_pct = round((pan_with / pan_total * 100), 1) if pan_total > 0 else 0
+    pan_pct = round(_safe_div(pan_with, pan_total) * 100, 1)
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:

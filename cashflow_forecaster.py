@@ -113,20 +113,64 @@ def _get_conn(db_path=None):
 # PART A: HISTORICAL ANALYSIS
 # ---------------------------------------------------------------------------
 
+def _has_table_cf(conn, table_name):
+    """Check if a table exists."""
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return (row[0] if row else 0) > 0
+    except Exception:
+        return False
+
+
+def _has_column_cf(conn, table_name, column_name):
+    """Check if a column exists in a table."""
+    try:
+        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return any(c[1].upper() == column_name.upper() for c in (cols or []))
+    except Exception:
+        return False
+
+
+_EMPTY_RESULT = {"monthly_data": [], "patterns": {}, "current_position": {}}
+
+
 def analyze_historical(db_path=None, months_back=12):
-    """Extract and analyze historical cash flow patterns from Tally data."""
-    conn = _get_conn(db_path)
+    """Extract and analyze historical cash flow patterns from Tally data.
+    DEFENSIVE: Handles missing tables, no Receipt/Payment vouchers, no bank accounts,
+    no cash accounts. Returns safe empty structure on any failure.
+    """
+    try:
+        conn = _get_conn(db_path)
+    except Exception:
+        return dict(_EMPTY_RESULT)
     try:
         return _analyze_historical_impl(conn, months_back)
+    except Exception:
+        return dict(_EMPTY_RESULT)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _analyze_historical_impl(conn, months_back):
+    # ---- Check required tables exist ----
+    if not _has_table_cf(conn, "trn_voucher"):
+        return dict(_EMPTY_RESULT)
+    if not _has_table_cf(conn, "trn_accounting"):
+        return dict(_EMPTY_RESULT)
+
     # ---- Determine month range ----
-    row = conn.execute("SELECT MIN(DATE), MAX(DATE) FROM trn_voucher").fetchone()
-    if not row or not row[0]:
-        return {"monthly_data": [], "patterns": {}, "current_position": {}}
+    try:
+        row = conn.execute("SELECT MIN(DATE), MAX(DATE) FROM trn_voucher WHERE DATE IS NOT NULL AND DATE != ''").fetchone()
+    except Exception:
+        return dict(_EMPTY_RESULT)
+    if not row or not row[0] or not row[1]:
+        return dict(_EMPTY_RESULT)
     min_date, max_date = row
     max_ym = max_date[:6]
     min_ym = min_date[:6]
@@ -190,17 +234,21 @@ def _analyze_historical_impl(conn, months_back):
     """).fetchall()
     purchase_by_month = {r[0]: r[1] for r in purchase_rows}
 
-    # ---- Salary payments ----
-    salary_rows = conn.execute("""
-        SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Salary Expenses'
-        GROUP BY month
-    """).fetchall()
-    salary_by_month = {r[0]: r[1] for r in salary_rows}
+    # ---- Salary payments (group may not exist in all companies) ----
+    salary_by_month = {}
+    try:
+        salary_rows = conn.execute("""
+            SELECT SUBSTR(v.DATE,1,6) as month,
+                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
+            WHERE l.PARENT = 'Salary Expenses'
+            GROUP BY month
+        """).fetchall()
+        salary_by_month = {r[0]: r[1] for r in (salary_rows or [])}
+    except Exception:
+        pass
 
     # ---- GST payments (Duties & Taxes ledgers with GST/CGST/SGST/IGST) ----
     gst_rows = conn.execute("""
@@ -231,30 +279,38 @@ def _analyze_historical_impl(conn, months_back):
     """).fetchall()
     tds_by_month = {r[0]: r[1] for r in tds_rows}
 
-    # ---- Rent payments ----
-    rent_rows = conn.execute("""
-        SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Rent Expenses'
-        GROUP BY month
-    """).fetchall()
-    rent_by_month = {r[0]: r[1] for r in rent_rows}
+    # ---- Rent payments (group may not exist) ----
+    rent_by_month = {}
+    try:
+        rent_rows = conn.execute("""
+            SELECT SUBSTR(v.DATE,1,6) as month,
+                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
+            WHERE l.PARENT = 'Rent Expenses'
+            GROUP BY month
+        """).fetchall()
+        rent_by_month = {r[0]: r[1] for r in (rent_rows or [])}
+    except Exception:
+        pass
 
-    # ---- Loan payments (EMI detection) ----
-    loan_rows = conn.execute("""
-        SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT IN ('Secured Loans', 'Unsecured Loans', 'Loans (Liability)')
-          AND v.VOUCHERTYPENAME = 'Payment'
-        GROUP BY month
-    """).fetchall()
-    loan_by_month = {r[0]: r[1] for r in loan_rows}
+    # ---- Loan payments (EMI detection, group may not exist) ----
+    loan_by_month = {}
+    try:
+        loan_rows = conn.execute("""
+            SELECT SUBSTR(v.DATE,1,6) as month,
+                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
+            WHERE l.PARENT IN ('Secured Loans', 'Unsecured Loans', 'Loans (Liability)')
+              AND v.VOUCHERTYPENAME = 'Payment'
+            GROUP BY month
+        """).fetchall()
+        loan_by_month = {r[0]: r[1] for r in (loan_rows or [])}
+    except Exception:
+        pass
 
     # ---- Build monthly data ----
     monthly_data = []
@@ -321,18 +377,27 @@ def _analyze_historical_impl(conn, months_back):
     total_sales = sum(sales_by_month.get(ym, 0) or 0 for ym in all_months)
     total_purchases = sum(purchase_by_month.get(ym, 0) or 0 for ym in all_months)
 
-    # Receivables and payables
-    debtor_row = conn.execute("""
-        SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
-        FROM mst_ledger WHERE PARENT = 'Sundry Debtors'
-    """).fetchone()
-    total_receivables = debtor_row[0] if debtor_row else 0
+    # Receivables and payables (CLOSINGBALANCE may not exist)
+    total_receivables = 0
+    total_payables = 0
+    if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
+        try:
+            debtor_row = conn.execute("""
+                SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
+                FROM mst_ledger WHERE PARENT = 'Sundry Debtors'
+            """).fetchone()
+            total_receivables = (debtor_row[0] if debtor_row else 0) or 0
+        except Exception:
+            pass
 
-    creditor_row = conn.execute("""
-        SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
-        FROM mst_ledger WHERE PARENT = 'Sundry Creditors'
-    """).fetchone()
-    total_payables = creditor_row[0] if creditor_row else 0
+        try:
+            creditor_row = conn.execute("""
+                SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
+                FROM mst_ledger WHERE PARENT = 'Sundry Creditors'
+            """).fetchone()
+            total_payables = (creditor_row[0] if creditor_row else 0) or 0
+        except Exception:
+            pass
 
     months_count = len(all_months)
     annualized_sales = total_sales / months_count * 12 if months_count > 0 else total_sales
@@ -353,24 +418,33 @@ def _analyze_historical_impl(conn, months_back):
         "working_capital_cycle": round(dso - dpo, 1),
     }
 
-    # ---- Current position ----
-    bank_rows = conn.execute("""
-        SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL)
-        FROM mst_ledger
-        WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c')
-    """).fetchall()
-    # In Tally, bank debit balance (asset) is negative CLOSINGBALANCE
-    bank_balance = sum(abs(r[2]) for r in bank_rows if r[2] and r[2] < 0)
+    # ---- Current position (CLOSINGBALANCE may not exist) ----
+    bank_balance = 0
+    cash_balance = 0
+    if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
+        try:
+            bank_rows = conn.execute("""
+                SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL)
+                FROM mst_ledger
+                WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c')
+            """).fetchall() or []
+            # In Tally, bank debit balance (asset) is negative CLOSINGBALANCE
+            bank_balance = sum(abs(r[2]) for r in bank_rows if r[2] and r[2] < 0)
+        except Exception:
+            pass
 
-    cash_rows = conn.execute("""
-        SELECT CAST(CLOSINGBALANCE AS REAL)
-        FROM mst_ledger WHERE PARENT = 'Cash-in-Hand'
-    """).fetchall()
-    # Cash debit balance is negative in Tally
-    cash_balance = sum(abs(r[0]) for r in cash_rows if r[0] and r[0] < 0)
-    # Also check positive (some Tally versions)
-    if cash_balance == 0:
-        cash_balance = sum(abs(r[0]) for r in cash_rows if r[0] and r[0] != 0)
+        try:
+            cash_rows = conn.execute("""
+                SELECT CAST(CLOSINGBALANCE AS REAL)
+                FROM mst_ledger WHERE PARENT = 'Cash-in-Hand'
+            """).fetchall() or []
+            # Cash debit balance is negative in Tally
+            cash_balance = sum(abs(r[0]) for r in cash_rows if r[0] and r[0] < 0)
+            # Also check positive (some Tally versions)
+            if cash_balance == 0:
+                cash_balance = sum(abs(r[0]) for r in cash_rows if r[0] and r[0] != 0)
+        except Exception:
+            pass
 
     current_position = {
         "bank_balance": bank_balance,

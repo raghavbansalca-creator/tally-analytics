@@ -39,6 +39,28 @@ MONTH_LABELS = {
 def ml(month_code):
     return MONTH_LABELS.get(month_code, month_code)
 
+def _safe_parse_date(date_str, fallback=None):
+    """Safely parse YYYYMMDD date string."""
+    try:
+        if date_str and len(date_str) >= 8:
+            return datetime.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+    except (ValueError, TypeError):
+        pass
+    return fallback
+
+def _safe_div(a, b, default=0):
+    """Safe division -- returns default if b is 0 or None."""
+    if not b:
+        return default
+    return a / b
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
 def fmt_cr(amount):
     if amount is None: return "0"
     return f"{amount/10000000:.2f} Cr" if abs(amount) >= 10000000 else f"{amount/100000:.2f} L"
@@ -122,8 +144,8 @@ company = company_row[0] if company_row else "Company"
 # -- GLOBAL DATE FILTER --
 _min_date_row = conn.execute("SELECT MIN(DATE) FROM trn_voucher").fetchone()
 _max_date_row = conn.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
-_min_dt = datetime.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else datetime.date(2025, 4, 1)
-_max_dt = datetime.date(int(_max_date_row[0][:4]), int(_max_date_row[0][4:6]), int(_max_date_row[0][6:8])) if _max_date_row and _max_date_row[0] else datetime.date.today()
+_min_dt = _safe_parse_date(_min_date_row[0] if _min_date_row else None, fallback=datetime.date(2025, 4, 1))
+_max_dt = _safe_parse_date(_max_date_row[0] if _max_date_row else None, fallback=datetime.date.today())
 if "global_start_date" not in st.session_state:
     st.session_state.global_start_date = _min_dt
 if "global_end_date" not in st.session_state:
@@ -426,8 +448,8 @@ total_expenses = sum(m["indirect_expenses"] for m in pnl)
 if len(pnl) >= 2:
     latest = pnl[-1]
     prev = pnl[-2]
-    sales_change = ((latest["sales"] - prev["sales"]) / prev["sales"] * 100) if prev["sales"] else 0
-    gp_change = ((latest["gross_profit"] - prev["gross_profit"]) / abs(prev["gross_profit"]) * 100) if prev["gross_profit"] else 0
+    sales_change = _safe_div(latest["sales"] - prev["sales"], prev["sales"]) * 100
+    gp_change = _safe_div(latest["gross_profit"] - prev["gross_profit"], abs(prev["gross_profit"]) if prev["gross_profit"] else 0) * 100
 else:
     sales_change = gp_change = 0
 
@@ -475,11 +497,11 @@ col1, col2 = st.columns(2)
 with col1:
     st.markdown("### Month-on-Month Sales")
     for i, m in enumerate(pnl):
-        mom_change = ((m["sales"] - pnl[i-1]["sales"]) / pnl[i-1]["sales"] * 100) if i > 0 and pnl[i-1]["sales"] else 0
+        mom_change = (_safe_div(m["sales"] - pnl[i-1]["sales"], pnl[i-1]["sales"]) * 100) if i > 0 else 0
         trend = "UP" if mom_change > 0 else ("DOWN" if mom_change < 0 else "--")
         c_month, c_amt, c_chg, c_btn = st.columns([2, 2, 1.5, 1])
         c_month.markdown(f"**{ml(m['month'])}**")
-        c_amt.markdown(f"Rs {m['sales']/100000:.2f} L")
+        c_amt.markdown(f"Rs {_safe_div(m['sales'], 100000):.2f} L")
         c_chg.markdown(f"{trend} {mom_change:+.1f}%")
         c_btn.button("Drill", key=f"drill_sales_{i}",
                      on_click=go_month_detail, args=(m["month"], "sales"))
@@ -487,11 +509,11 @@ with col1:
 with col2:
     st.markdown("### Month-on-Month Purchases")
     for i, m in enumerate(pnl):
-        mom_change = ((m["purchases"] - pnl[i-1]["purchases"]) / pnl[i-1]["purchases"] * 100) if i > 0 and pnl[i-1]["purchases"] else 0
+        mom_change = (_safe_div(m["purchases"] - pnl[i-1]["purchases"], pnl[i-1]["purchases"]) * 100) if i > 0 else 0
         trend = "UP" if mom_change > 0 else ("DOWN" if mom_change < 0 else "--")
         c_month, c_amt, c_chg, c_btn = st.columns([2, 2, 1.5, 1])
         c_month.markdown(f"**{ml(m['month'])}**")
-        c_amt.markdown(f"Rs {m['purchases']/100000:.2f} L")
+        c_amt.markdown(f"Rs {_safe_div(m['purchases'], 100000):.2f} L")
         c_chg.markdown(f"{trend} {mom_change:+.1f}%")
         c_btn.button("Drill", key=f"drill_purch_{i}",
                      on_click=go_month_detail, args=(m["month"], "purchases"))
@@ -651,8 +673,8 @@ with col1:
             cc1.button(f"{name[:35]}", key=f"drill_cust_{i}",
                        on_click=go_party_detail, args=(name, "customer"))
             cc2.markdown(f"{count} inv")
-            cc3.markdown(f"**{fmt_inr(total)}** ({total/total_sales*100:.1f}%)")
-        st.caption(f"Top 15 contribute {cumulative/total_sales*100:.1f}% of total sales -- {'High' if cumulative/total_sales > 0.6 else 'Low'} concentration")
+            cc3.markdown(f"**{fmt_inr(total)}** ({_safe_div(total, total_sales) * 100:.1f}%)")
+        st.caption(f"Top 15 contribute {_safe_div(cumulative, total_sales) * 100:.1f}% of total sales -- {'High' if _safe_div(cumulative, total_sales) > 0.6 else 'Low'} concentration")
 
 with col2:
     st.markdown("### Top 15 Suppliers by Purchases")
@@ -667,8 +689,8 @@ with col2:
             sc1.button(f"{name[:35]}", key=f"drill_supp_{i}",
                        on_click=go_party_detail, args=(name, "supplier"))
             sc2.markdown(f"{count} bills")
-            sc3.markdown(f"**{fmt_inr(total)}** ({total/total_purchases*100:.1f}%)")
-        st.caption(f"Top 15 contribute {cumulative/total_purchases*100:.1f}% of total purchases")
+            sc3.markdown(f"**{fmt_inr(total)}** ({_safe_div(total, total_purchases) * 100:.1f}%)")
+        st.caption(f"Top 15 contribute {_safe_div(cumulative, total_purchases) * 100:.1f}% of total purchases")
 
 st.markdown("---")
 
@@ -884,7 +906,7 @@ if projections:
 
     # Risk assessment
     st.markdown("### Cash Flow Risk Assessment")
-    avg_monthly_burn = sum(m["payments"] for m in cf) / len(cf)
+    avg_monthly_burn = _safe_div(sum(m["payments"] for m in cf), len(cf))
     months_of_runway = current_bal / avg_monthly_burn if avg_monthly_burn > 0 else 999
 
     if months_of_runway > 6:
@@ -906,32 +928,32 @@ section_header("Key Insights & Observations")
 insights = []
 
 # Sales trend
-first_3_avg = sum(m["sales"] for m in pnl[:3]) / 3
-last_3_avg = sum(m["sales"] for m in pnl[-3:]) / 3
-sales_trend_pct = ((last_3_avg - first_3_avg) / first_3_avg * 100) if first_3_avg else 0
+first_3_avg = _safe_div(sum(m["sales"] for m in pnl[:3]), min(len(pnl), 3))
+last_3_avg = _safe_div(sum(m["sales"] for m in pnl[-3:]), min(len(pnl), 3))
+sales_trend_pct = _safe_div(last_3_avg - first_3_avg, first_3_avg) * 100
 if sales_trend_pct < -10:
     insights.append(f"WARN **Sales declining**: Average monthly sales dropped {abs(sales_trend_pct):.0f}% from first 3 months ({fmt_inr(first_3_avg)}/month) to last 3 months ({fmt_inr(last_3_avg)}/month)")
 elif sales_trend_pct > 10:
     insights.append(f"OK **Sales growing**: Average monthly sales grew {sales_trend_pct:.0f}% from first 3 months to last 3 months")
 
 # Margin trend
-first_3_gp = sum(m["gp_margin"] for m in pnl[:3]) / 3
-last_3_gp = sum(m["gp_margin"] for m in pnl[-3:]) / 3
+first_3_gp = _safe_div(sum(m["gp_margin"] for m in pnl[:3]), min(len(pnl), 3))
+last_3_gp = _safe_div(sum(m["gp_margin"] for m in pnl[-3:]), min(len(pnl), 3))
 if last_3_gp < first_3_gp - 2:
     insights.append(f"WARN **Margin compression**: GP margin declined from {first_3_gp:.1f}% to {last_3_gp:.1f}%")
 elif last_3_gp > first_3_gp + 2:
     insights.append(f"OK **Margin improvement**: GP margin improved from {first_3_gp:.1f}% to {last_3_gp:.1f}%")
 
 # Collection efficiency
-avg_eff = sum(e["efficiency"] for e in eff_data) / len(eff_data) if eff_data else 0
+avg_eff = _safe_div(sum(e["efficiency"] for e in eff_data), len(eff_data)) if eff_data else 0
 if avg_eff < 50:
     insights.append(f"ALERT **Poor collection efficiency**: Only {avg_eff:.0f}% of sales collected on average -- significant credit buildup")
 elif avg_eff < 70:
     insights.append(f"WARN **Moderate collection**: {avg_eff:.0f}% of sales collected -- room for improvement")
 
 # Creditor concentration
-if suppliers:
-    top1_pct = suppliers[0][2] / total_purchases * 100
+if suppliers and total_purchases:
+    top1_pct = _safe_div(suppliers[0][2], total_purchases) * 100
     if top1_pct > 30:
         insights.append(f"WARN **Supplier concentration risk**: {suppliers[0][0]} accounts for {top1_pct:.0f}% of all purchases")
 
@@ -954,8 +976,9 @@ if len(negative_cf_months) > len(cf) / 2:
     insights.append(f"ALERT **Negative cash flow**: {len(negative_cf_months)} out of {len(cf)} months had net cash outflow")
 
 # Latest month purchase spike
-if len(pnl) >= 2 and pnl[-1]["purchases"] > pnl[-2]["purchases"] * 1.4:
-    insights.append(f"NOTE **Purchase spike in {ml(pnl[-1]['month'])}**: Purchases jumped {((pnl[-1]['purchases']-pnl[-2]['purchases'])/pnl[-2]['purchases']*100):.0f}% -- bulk stocking or supplier pressure?")
+if len(pnl) >= 2 and pnl[-2]["purchases"] and pnl[-1]["purchases"] > pnl[-2]["purchases"] * 1.4:
+    _spike_pct = _safe_div(pnl[-1]['purchases'] - pnl[-2]['purchases'], pnl[-2]['purchases']) * 100
+    insights.append(f"NOTE **Purchase spike in {ml(pnl[-1]['month'])}**: Purchases jumped {_spike_pct:.0f}% -- bulk stocking or supplier pressure?")
 
 for insight in insights:
     st.markdown(insight)

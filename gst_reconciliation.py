@@ -37,6 +37,14 @@ except ImportError:
 #  UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _safe_cols(conn, table):
+    """Return set of column names for a table. Returns empty set on failure."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
 def _safe_float(val):
     """Convert to float, returning 0.0 on failure."""
     if val is None or val == "":
@@ -165,7 +173,11 @@ def _detect_gst_ledgers(conn):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _read_file_data(file_path_or_data, file_type="json"):
-    """Read file content — handles path string, bytes, or already-parsed data."""
+    """Read file content — handles path string, bytes, or already-parsed data.
+    Raises ValueError with clear message on malformed files.
+    """
+    if file_path_or_data is None:
+        return {} if file_type == "json" else b""
     if isinstance(file_path_or_data, dict) or isinstance(file_path_or_data, list):
         return file_path_or_data
 
@@ -181,20 +193,31 @@ def _read_file_data(file_path_or_data, file_type="json"):
     else:
         raw = file_path_or_data if isinstance(file_path_or_data, str) else str(file_path_or_data)
         if file_type == "json":
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, ValueError) as e:
+                raise ValueError(f"Malformed JSON file: {e}")
         return raw
 
     if file_type == "json":
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8", errors="replace")
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ValueError(f"Malformed JSON file: {e}")
     return raw
 
 
 def _extract_tables_from_pdf(file_path_or_data):
-    """Extract tables from PDF using pdfplumber. Returns list of dicts."""
+    """Extract tables from PDF using pdfplumber. Returns list of dicts.
+    Handles malformed PDFs with clear error messages.
+    """
     if not HAS_PDF:
         raise ImportError("pdfplumber is required for PDF parsing. Install: pip install pdfplumber")
+
+    if file_path_or_data is None:
+        return []
 
     if isinstance(file_path_or_data, str) and os.path.isfile(file_path_or_data):
         pdf = pdfplumber.open(file_path_or_data)
@@ -212,37 +235,53 @@ def _extract_tables_from_pdf(file_path_or_data):
 
     all_rows = []
     headers = None
-    for page in pdf.pages:
-        tables = page.extract_tables()
-        for table in tables:
-            if not table:
+    try:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            if not tables:
                 continue
-            for row_idx, row in enumerate(table):
-                if row_idx == 0 and headers is None:
-                    headers = [str(c or "").strip() for c in row]
+            for table in tables:
+                if not table:
                     continue
-                if headers and len(row) == len(headers):
-                    rec = {}
-                    for i, h in enumerate(headers):
-                        rec[h] = str(row[i] or "").strip()
-                    all_rows.append(rec)
-    pdf.close()
+                for row_idx, row in enumerate(table):
+                    if not row:
+                        continue
+                    if row_idx == 0 and headers is None:
+                        headers = [str(c or "").strip() for c in row]
+                        continue
+                    if headers and len(row) == len(headers):
+                        rec = {}
+                        for i, h in enumerate(headers):
+                            rec[h] = str(row[i] or "").strip()
+                        all_rows.append(rec)
+    except Exception as e:
+        raise ValueError(f"Failed to extract tables from PDF: {e}")
+    finally:
+        try:
+            pdf.close()
+        except Exception:
+            pass
     return all_rows
 
 
 def _parse_excel_to_dicts(file_path_or_data):
-    """Parse Excel/CSV to list of dicts."""
-    if HAS_PANDAS:
+    """Parse Excel/CSV to list of dicts. Handles malformed files with clear errors."""
+    if not HAS_PANDAS:
+        raise ImportError("pandas is required for Excel parsing. Install: pip install pandas openpyxl")
+    if file_path_or_data is None:
+        return []
+    try:
         if isinstance(file_path_or_data, str) and file_path_or_data.endswith(".csv"):
             df = pd.read_csv(file_path_or_data)
         elif isinstance(file_path_or_data, str):
             df = pd.read_excel(file_path_or_data)
-        elif hasattr(file_path_or_data, "name") and file_path_or_data.name.endswith(".csv"):
+        elif hasattr(file_path_or_data, "name") and str(getattr(file_path_or_data, "name", "")).endswith(".csv"):
             df = pd.read_csv(file_path_or_data)
         else:
             df = pd.read_excel(file_path_or_data)
         return df.fillna("").to_dict("records")
-    raise ImportError("pandas is required for Excel parsing. Install: pip install pandas openpyxl")
+    except Exception as e:
+        raise ValueError(f"Failed to parse Excel/CSV file: {e}")
 
 
 def _map_excel_gstr2b_row(row):
@@ -678,8 +717,13 @@ def _parse_3b_row_values(vals):
 def get_books_purchases(db_path, from_date, to_date):
     """Get all purchase invoices from Tally with GST breakup.
     Returns list of dicts: [{gstin, invoice_no, date, party, taxable_value, cgst, sgst, igst, rate}]
+    Defensive: checks all columns exist before querying.
     """
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return []
+
     gst = _detect_gst_ledgers(conn)
 
     all_input = gst["input_cgst"] + gst["input_sgst"] + gst["input_igst"]
@@ -687,17 +731,42 @@ def get_books_purchases(db_path, from_date, to_date):
         conn.close()
         return []
 
+    # Check which columns exist
+    vch_cols = _safe_cols(conn, "trn_voucher")
+    acct_cols = _safe_cols(conn, "trn_accounting")
+
+    if "GUID" not in vch_cols or "LEDGERNAME" not in acct_cols:
+        conn.close()
+        return []
+
+    _partygstin_col = "v.PARTYGSTIN" if "PARTYGSTIN" in vch_cols else "''"
+    _pos_col = "v.PLACEOFSUPPLY" if "PLACEOFSUPPLY" in vch_cols else "''"
+    _vtype_col = "v.VOUCHERTYPENAME" if "VOUCHERTYPENAME" in vch_cols else "''"
+    _party_col = "v.PARTYLEDGERNAME" if "PARTYLEDGERNAME" in vch_cols else "''"
+    _vnum_col = "v.VOUCHERNUMBER" if "VOUCHERNUMBER" in vch_cols else "''"
+    _date_col = "v.DATE" if "DATE" in vch_cols else "''"
+
     placeholders = ",".join(["?"] * len(all_input))
-    vouchers = conn.execute(f"""
-        SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME,
-               v.PARTYGSTIN, v.PLACEOFSUPPLY, v.VOUCHERTYPENAME
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE a.LEDGERNAME IN ({placeholders})
-          AND v.VOUCHERTYPENAME != 'Debit Note'
-          AND v.DATE >= ? AND v.DATE <= ?
-        ORDER BY v.DATE, v.VOUCHERNUMBER
-    """, all_input + [from_date, to_date]).fetchall()
+
+    # Build voucher type filter only if column exists
+    vtype_filter = "AND v.VOUCHERTYPENAME != 'Debit Note'" if "VOUCHERTYPENAME" in vch_cols else ""
+    date_filter = f"AND v.DATE >= ? AND v.DATE <= ?" if "DATE" in vch_cols else ""
+    date_params = [from_date, to_date] if "DATE" in vch_cols else []
+
+    try:
+        vouchers = conn.execute(f"""
+            SELECT DISTINCT v.GUID, {_date_col}, {_vnum_col}, {_party_col},
+                   {_partygstin_col}, {_pos_col}, {_vtype_col}
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            WHERE a.LEDGERNAME IN ({placeholders})
+              {vtype_filter}
+              {date_filter}
+            ORDER BY v.GUID
+        """, all_input + date_params).fetchall()
+    except Exception:
+        conn.close()
+        return []
 
     results = []
     seen = set()
@@ -757,8 +826,13 @@ def get_books_purchases(db_path, from_date, to_date):
 def get_books_sales(db_path, from_date, to_date):
     """Get all sales invoices from Tally with GST breakup.
     Returns list of dicts: [{gstin, invoice_no, date, party, taxable_value, cgst, sgst, igst, rate}]
+    Defensive: checks all columns exist before querying.
     """
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return []
+
     gst = _detect_gst_ledgers(conn)
 
     all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
@@ -766,22 +840,42 @@ def get_books_sales(db_path, from_date, to_date):
         conn.close()
         return []
 
+    # Check which columns exist
+    vch_cols = _safe_cols(conn, "trn_voucher")
+    acct_cols = _safe_cols(conn, "trn_accounting")
+
+    if "GUID" not in vch_cols or "LEDGERNAME" not in acct_cols:
+        conn.close()
+        return []
+
+    _consignee_col = "v.CONSIGNEEGSTIN" if "CONSIGNEEGSTIN" in vch_cols else "''"
+    _partygstin_col = "v.PARTYGSTIN" if "PARTYGSTIN" in vch_cols else "''"
+    _pos_col = "v.PLACEOFSUPPLY" if "PLACEOFSUPPLY" in vch_cols else "''"
+    _vtype_col = "v.VOUCHERTYPENAME" if "VOUCHERTYPENAME" in vch_cols else "''"
+    _party_col = "v.PARTYLEDGERNAME" if "PARTYLEDGERNAME" in vch_cols else "''"
+    _vnum_col = "v.VOUCHERNUMBER" if "VOUCHERNUMBER" in vch_cols else "''"
+    _date_col = "v.DATE" if "DATE" in vch_cols else "''"
+
     placeholders = ",".join(["?"] * len(all_output))
 
-    # Check if CONSIGNEEGSTIN column exists (not all Tally exports include it)
-    _vch_cols = [row[1] for row in conn.execute("PRAGMA table_info(trn_voucher)").fetchall()]
-    _consignee_col = "v.CONSIGNEEGSTIN" if "CONSIGNEEGSTIN" in _vch_cols else "''"
+    vtype_filter = "AND v.VOUCHERTYPENAME != 'Credit Note'" if "VOUCHERTYPENAME" in vch_cols else ""
+    date_filter = f"AND v.DATE >= ? AND v.DATE <= ?" if "DATE" in vch_cols else ""
+    date_params = [from_date, to_date] if "DATE" in vch_cols else []
 
-    vouchers = conn.execute(f"""
-        SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME,
-               v.PARTYGSTIN, {_consignee_col}, v.PLACEOFSUPPLY, v.VOUCHERTYPENAME
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE a.LEDGERNAME IN ({placeholders})
-          AND v.VOUCHERTYPENAME != 'Credit Note'
-          AND v.DATE >= ? AND v.DATE <= ?
-        ORDER BY v.DATE, v.VOUCHERNUMBER
-    """, all_output + [from_date, to_date]).fetchall()
+    try:
+        vouchers = conn.execute(f"""
+            SELECT DISTINCT v.GUID, {_date_col}, {_vnum_col}, {_party_col},
+                   {_partygstin_col}, {_consignee_col}, {_pos_col}, {_vtype_col}
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            WHERE a.LEDGERNAME IN ({placeholders})
+              {vtype_filter}
+              {date_filter}
+            ORDER BY v.GUID
+        """, all_output + date_params).fetchall()
+    except Exception:
+        conn.close()
+        return []
 
     results = []
     seen = set()

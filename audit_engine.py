@@ -2,31 +2,54 @@
 Seven Labs Vision — Audit Red Flag Engine (Layer 3)
 Automated audit checks that run on any Tally company data.
 Each check returns a list of flagged items with severity and details.
+
+DEFENSIVE: Handles missing columns (NARRATION, CLOSINGBALANCE),
+very small companies (10 vouchers), companies with only Journals,
+Benford's Law minimum 100 transactions, zero division protection.
 """
 
 import sqlite3
 import math
 from collections import Counter
 from datetime import datetime, timedelta
+from defensive_helpers import (
+    table_exists, column_exists, get_table_columns,
+    safe_float, safe_divide
+)
 
 
 def run_all_checks(db_path="tally_data.db"):
     """Run all audit checks and return consolidated results."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except Exception as e:
+        return {"_summary": {"total_checks": 0, "total_flags": 0,
+                "error": str(e), "risk_score": 0}}
 
     results = {}
-    results["benfords_law"] = check_benfords_law(conn)
-    results["duplicate_invoices"] = check_duplicate_invoices(conn)
-    results["voucher_gaps"] = check_voucher_gaps(conn)
-    results["holiday_entries"] = check_holiday_entries(conn)
-    results["cash_limit_breach"] = check_cash_limit(conn)
-    results["round_amount_entries"] = check_round_amounts(conn)
-    results["negative_cash_balance"] = check_negative_cash(conn)
-    results["debit_creditors"] = check_debit_balance_creditors(conn)
-    results["credit_debtors"] = check_credit_balance_debtors(conn)
-    results["period_end_journals"] = check_period_end_journals(conn)
-    results["large_journal_entries"] = check_large_journals(conn)
+
+    # Each check is wrapped individually so one failure doesn't stop all
+    check_funcs = [
+        ("benfords_law", check_benfords_law),
+        ("duplicate_invoices", check_duplicate_invoices),
+        ("voucher_gaps", check_voucher_gaps),
+        ("holiday_entries", check_holiday_entries),
+        ("cash_limit_breach", check_cash_limit),
+        ("round_amount_entries", check_round_amounts),
+        ("negative_cash_balance", check_negative_cash),
+        ("debit_creditors", check_debit_balance_creditors),
+        ("credit_debtors", check_credit_balance_debtors),
+        ("period_end_journals", check_period_end_journals),
+        ("large_journal_entries", check_large_journals),
+    ]
+
+    for key, func in check_funcs:
+        try:
+            results[key] = func(conn)
+        except Exception as e:
+            results[key] = {"check": key, "severity": "Medium", "flag_count": 0,
+                           "status": "error", "error": str(e)}
 
     # Summary
     total_flags = sum(r.get("flag_count", 0) for r in results.values())
@@ -34,7 +57,7 @@ def run_all_checks(db_path="tally_data.db"):
     medium_flags = sum(1 for r in results.values() if r.get("severity") == "Medium" and r.get("flag_count", 0) > 0)
 
     results["_summary"] = {
-        "total_checks": len(results) - 1,  # Exclude _summary itself
+        "total_checks": len(results),
         "total_flags": total_flags,
         "high_severity_checks": high_flags,
         "medium_severity_checks": medium_flags,
@@ -286,8 +309,10 @@ def check_holiday_entries(conn):
     """Flag transactions recorded on Sundays (and optionally other holidays)."""
     cur = conn.cursor()
     try:
-        cur.execute("""
-            SELECT GUID, DATE, VOUCHERTYPENAME, VOUCHERNUMBER, PARTYLEDGERNAME, NARRATION
+        has_narration = column_exists(conn, "trn_voucher", "NARRATION")
+        narration_col = ", NARRATION" if has_narration else ""
+        cur.execute(f"""
+            SELECT GUID, DATE, VOUCHERTYPENAME, VOUCHERNUMBER, PARTYLEDGERNAME{narration_col}
             FROM trn_voucher
             WHERE DATE IS NOT NULL AND DATE != ''
         """)
@@ -305,7 +330,7 @@ def check_holiday_entries(conn):
                             "voucher_type": row["VOUCHERTYPENAME"],
                             "voucher_number": row["VOUCHERNUMBER"],
                             "party": row["PARTYLEDGERNAME"] or "",
-                            "narration": (row["NARRATION"] or "")[:100],
+                            "narration": ((row["NARRATION"] or "")[:100]) if has_narration else "",
                         })
             except:
                 continue
@@ -372,9 +397,11 @@ def check_cash_limit(conn):
                     "status": "skipped", "reason": "No cash ledgers found"}
 
         cash_names = "','".join(cash_ledgers)
+        has_narration = column_exists(conn, "trn_voucher", "NARRATION")
+        narration_sel = ", v.NARRATION" if has_narration else ""
         cur.execute(f"""
             SELECT a.VOUCHER_GUID, a.LEDGERNAME, a.AMOUNT, a.ISDEEMEDPOSITIVE,
-                   v.DATE, v.VOUCHERTYPENAME, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION
+                   v.DATE, v.VOUCHERTYPENAME, v.VOUCHERNUMBER, v.PARTYLEDGERNAME{narration_sel}
             FROM trn_accounting a
             JOIN trn_voucher v ON a.VOUCHER_GUID = v.GUID
             WHERE a.LEDGERNAME IN ('{cash_names}')
@@ -395,7 +422,7 @@ def check_cash_limit(conn):
                     "party": row["PARTYLEDGERNAME"] or "",
                     "amount": amt,
                     "direction": "Receipt" if row["ISDEEMEDPOSITIVE"] == "Yes" else "Payment",
-                    "narration": (row["NARRATION"] or "")[:100],
+                    "narration": ((row["NARRATION"] or "")[:100]) if has_narration else "",
                 })
             except:
                 continue
@@ -423,10 +450,12 @@ def check_round_amounts(conn):
     """Flag transactions with suspiciously round amounts (ending in 000, 00000)."""
     cur = conn.cursor()
     try:
+        has_narration = column_exists(conn, "trn_voucher", "NARRATION")
+        narration_sel = ", v.NARRATION" if has_narration else ""
         # Journal entries with round amounts are most suspicious
-        cur.execute("""
+        cur.execute(f"""
             SELECT v.GUID, v.DATE, v.VOUCHERTYPENAME, v.VOUCHERNUMBER,
-                   v.PARTYLEDGERNAME, v.NARRATION,
+                   v.PARTYLEDGERNAME{narration_sel},
                    a.LEDGERNAME, a.AMOUNT
             FROM trn_accounting a
             JOIN trn_voucher v ON a.VOUCHER_GUID = v.GUID
@@ -460,7 +489,7 @@ def check_round_amounts(conn):
                     "amount": amt,
                     "roundness": roundness,
                     "party": row["PARTYLEDGERNAME"] or "",
-                    "narration": (row["NARRATION"] or "")[:100],
+                    "narration": ((row["NARRATION"] or "")[:100]) if has_narration else "",
                 })
             except:
                 continue
@@ -650,8 +679,10 @@ def check_period_end_journals(conn):
             "03": [29, 30, 31],
         }
 
-        cur.execute("""
-            SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
+        has_narration = column_exists(conn, "trn_voucher", "NARRATION")
+        narration_sel = ", v.NARRATION" if has_narration else ""
+        cur.execute(f"""
+            SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME{narration_sel},
                    a.LEDGERNAME, a.AMOUNT
             FROM trn_voucher v
             JOIN trn_accounting a ON v.GUID = a.VOUCHER_GUID
@@ -673,7 +704,7 @@ def check_period_end_journals(conn):
                     guid = row["GUID"]
                     if guid not in seen_guids:
                         seen_guids.add(guid)
-                        amt = abs(float(row["AMOUNT"])) if row["AMOUNT"] else 0
+                        amt = abs(safe_float(row["AMOUNT"]))
                         dt = datetime.strptime(date_str, "%Y%m%d").strftime("%d-%b-%Y")
                         flagged.append({
                             "date": dt,
@@ -681,7 +712,7 @@ def check_period_end_journals(conn):
                             "ledger": row["LEDGERNAME"],
                             "amount": round(amt, 2),
                             "party": row["PARTYLEDGERNAME"] or "",
-                            "narration": (row["NARRATION"] or "")[:100],
+                            "narration": ((row["NARRATION"] or "")[:100]) if has_narration else "",
                         })
             except:
                 continue
@@ -724,18 +755,20 @@ def check_large_journals(conn):
 
         if len(amounts) < 10:
             return {"check": "Large Journal Entries", "severity": "Medium", "flag_count": 0,
-                    "status": "skipped", "reason": "Too few journal entries"}
+                    "status": "skipped", "reason": f"Too few journal entries ({len(amounts)})"}
 
-        mean = sum(amounts) / len(amounts)
-        variance = sum((x - mean) ** 2 for x in amounts) / len(amounts)
+        mean = safe_divide(sum(amounts), len(amounts), 0)
+        variance = safe_divide(sum((x - mean) ** 2 for x in amounts), len(amounts), 0)
         std_dev = math.sqrt(variance) if variance > 0 else 0
         threshold = mean + 3 * std_dev
 
         if threshold < 100000:  # Minimum threshold of 1 lakh
             threshold = 100000
 
+        has_narration = column_exists(conn, "trn_voucher", "NARRATION")
+        narration_sel = ", v.NARRATION" if has_narration else ""
         cur.execute(f"""
-            SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
+            SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME{narration_sel},
                    a.LEDGERNAME, a.AMOUNT
             FROM trn_accounting a
             JOIN trn_voucher v ON a.VOUCHER_GUID = v.GUID
@@ -762,8 +795,8 @@ def check_large_journals(conn):
                     "ledger": row["LEDGERNAME"],
                     "amount": round(amt, 2),
                     "party": row["PARTYLEDGERNAME"] or "",
-                    "narration": (row["NARRATION"] or "")[:100],
-                    "std_devs_from_mean": round((amt - mean) / std_dev, 1) if std_dev > 0 else 0,
+                    "narration": ((row["NARRATION"] or "")[:100]) if has_narration else "",
+                    "std_devs_from_mean": round(safe_divide(amt - mean, std_dev, 0), 1),
                 })
             except:
                 continue

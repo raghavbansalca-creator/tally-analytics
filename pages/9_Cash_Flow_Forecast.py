@@ -416,17 +416,18 @@ section_header("CASH FLOW FORECAST")
 
 fig_fc = go.Figure()
 
-# Historical bars (solid)
+# Historical bars (solid) -- DEFENSIVE: guard empty monthly_data
+_hist_tail = monthly_data[-6:] if monthly_data else []
 fig_fc.add_trace(go.Bar(
-    x=[d["label"] for d in monthly_data[-6:]],
-    y=[d["receipts"] for d in monthly_data[-6:]],
+    x=[d["label"] for d in _hist_tail],
+    y=[d["receipts"] for d in _hist_tail],
     name="Historical Receipts",
     marker_color="#059669",
     opacity=0.9,
 ))
 fig_fc.add_trace(go.Bar(
-    x=[d["label"] for d in monthly_data[-6:]],
-    y=[d["payments"] for d in monthly_data[-6:]],
+    x=[d["label"] for d in _hist_tail],
+    y=[d["payments"] for d in _hist_tail],
     name="Historical Payments",
     marker_color="#dc2626",
     opacity=0.9,
@@ -439,8 +440,9 @@ scenario_colors = {
     "pessimistic": "#dc2626",
 }
 
-# Forecast bars (lighter) -- only for primary scenario
-primary = st.session_state.cf_scenarios_selected[0] if st.session_state.cf_scenarios_selected else "base"
+# Forecast bars (lighter) -- only for primary scenario (DEFENSIVE: handle empty selection)
+_sel_scenarios = st.session_state.get("cf_scenarios_selected", ["base"])
+primary = _sel_scenarios[0] if _sel_scenarios else "base"
 if primary in forecasts:
     fc_data = forecasts[primary]["forecast_months"]
     fig_fc.add_trace(go.Bar(
@@ -463,8 +465,10 @@ if primary in forecasts:
 # Closing bank balance lines for all scenarios
 for sc_name, fc_result in forecasts.items():
     fc_months = fc_result["forecast_months"]
-    # Combine last historical month closing with forecast
+    # Combine last historical month closing with forecast (DEFENSIVE: guard empty)
     hist_last_label = monthly_data[-1]["label"] if monthly_data else ""
+    if not hist_last_label and not fc_months:
+        continue
     x_vals = [hist_last_label] + [fm["label"] for fm in fc_months]
     y_vals = [current_pos.get("total_liquid", 0)] + [fm["projected_closing_bank"] for fm in fc_months]
 
@@ -479,7 +483,7 @@ for sc_name, fc_result in forecasts.items():
 
 # Minimum cash threshold line
 min_threshold = st.session_state.cf_assumptions.get("minimum_cash_threshold", 500000)
-all_x = [d["label"] for d in monthly_data[-6:]]
+all_x = [d["label"] for d in _hist_tail]
 if primary in forecasts:
     all_x += [fm["label"] for fm in forecasts[primary]["forecast_months"]]
 fig_fc.add_trace(go.Scatter(
@@ -676,13 +680,20 @@ for rec in recommendations:
 
 section_header("MONTH-BY-MONTH FORECAST")
 
-# Tabs for each scenario
+# Tabs for each scenario (DEFENSIVE: handle empty forecasts, single scenario)
+if not forecasts:
+    info_banner("No forecast scenarios selected.", "warning")
+    st.stop()
+
 if len(forecasts) > 1:
     tab_names = [sc.title() for sc in forecasts.keys()]
     tabs = st.tabs(tab_names)
     tab_map = dict(zip(forecasts.keys(), tabs))
+elif len(forecasts) == 1:
+    single_key = list(forecasts.keys())[0]
+    tab_map = {single_key: st.container()}
 else:
-    tab_map = {list(forecasts.keys())[0]: st.container()} if forecasts else {}
+    tab_map = {}
 
 for sc_name, container in tab_map.items():
     fc_result = forecasts[sc_name]

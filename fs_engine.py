@@ -26,6 +26,10 @@ from typing import Dict, List, Optional, Tuple, Set
 from enum import Enum
 from decimal import Decimal
 import logging
+from defensive_helpers import (
+    table_exists, column_exists, get_table_columns,
+    safe_float, safe_divide, safe_fetchone, safe_fetchall
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -446,6 +450,7 @@ class TallyDataExtractor:
     def load_metadata(self) -> Dict[str, str]:
         """
         Load metadata from _metadata table.
+        Safe: handles missing _metadata table.
 
         Returns:
             Dictionary of metadata key-value pairs
@@ -453,10 +458,20 @@ class TallyDataExtractor:
         if not self.connection:
             raise RuntimeError("Database not connected")
 
-        cursor = self.connection.cursor()
-        cursor.execute("SELECT key, value FROM _metadata")
-        self.metadata = {row[0]: row[1] for row in cursor.fetchall()}
-        logger.info(f"Loaded metadata: company_name={self.metadata.get('company_name')}")
+        try:
+            if not table_exists(self.connection, "_metadata"):
+                logger.warning("_metadata table not found, returning empty metadata")
+                self.metadata = {}
+                return self.metadata
+
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT key, value FROM _metadata")
+            rows = cursor.fetchall()
+            self.metadata = {row[0]: row[1] for row in rows} if rows else {}
+            logger.info(f"Loaded metadata: company_name={self.metadata.get('company_name')}")
+        except Exception as e:
+            logger.warning(f"Failed to load metadata: {e}")
+            self.metadata = {}
         return self.metadata
 
     def build_group_hierarchy(self) -> Dict[str, TallyGroupNode]:
@@ -473,20 +488,31 @@ class TallyDataExtractor:
             raise RuntimeError("Database not connected")
 
         cursor = self.connection.cursor()
-        cursor.execute(
-            """
-            SELECT NAME, PARENT, ISDEEMEDPOSITIVE, ISREVENUE
-            FROM mst_group
-            ORDER BY NAME
-            """
-        )
+
+        # Check which columns exist in mst_group
+        group_cols = get_table_columns(self.connection, "mst_group")
+        has_deemed = "ISDEEMEDPOSITIVE" in group_cols
+        has_revenue = "ISREVENUE" in group_cols
+
+        select_cols = ["NAME", "PARENT"]
+        if has_deemed:
+            select_cols.append("ISDEEMEDPOSITIVE")
+        if has_revenue:
+            select_cols.append("ISREVENUE")
+
+        cursor.execute(f"SELECT {', '.join(select_cols)} FROM mst_group ORDER BY NAME")
 
         # First pass: create all nodes
         for row in cursor.fetchall():
-            name = row[0]
-            parent = row[1]
-            is_deemed_positive = row[2] == "Yes"
-            is_revenue = row[3] == "Yes"
+            idx = 0
+            name = row[idx]; idx += 1
+            parent = row[idx]; idx += 1
+            is_deemed_positive = False
+            is_revenue = False
+            if has_deemed:
+                is_deemed_positive = row[idx] == "Yes"; idx += 1
+            if has_revenue:
+                is_revenue = row[idx] == "Yes"; idx += 1
 
             node = TallyGroupNode(
                 name=name,
@@ -539,9 +565,22 @@ class TallyDataExtractor:
             raise RuntimeError("Group hierarchy not built. Call build_group_hierarchy first")
 
         cursor = self.connection.cursor()
+
+        # Verify required columns exist
+        ledger_cols = get_table_columns(self.connection, "mst_ledger")
+        if "CLOSINGBALANCE" not in ledger_cols:
+            logger.error("mst_ledger missing CLOSINGBALANCE column")
+            return TrialBalance(
+                total_debits=Decimal(0), total_credits=Decimal(0),
+                net_balance=Decimal(0), ledger_count=0,
+            )
+
+        has_ob = "OPENINGBALANCE" in ledger_cols
+        ob_col = "OPENINGBALANCE" if has_ob else "NULL"
+
         cursor.execute(
-            """
-            SELECT NAME, PARENT, OPENINGBALANCE, CLOSINGBALANCE
+            f"""
+            SELECT NAME, PARENT, {ob_col} as OPENINGBALANCE, CLOSINGBALANCE
             FROM mst_ledger
             WHERE CLOSINGBALANCE IS NOT NULL AND CLOSINGBALANCE != ''
             ORDER BY NAME

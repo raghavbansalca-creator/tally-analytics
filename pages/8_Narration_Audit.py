@@ -1,6 +1,9 @@
 """
 Seven Labs Vision -- Narration Audit Dashboard
 Analyze voucher narrations, classify transactions, flag suspicious entries.
+
+Defensive: try/except around each section, safe column access,
+safe division, safe list/dict operations.
 """
 
 import streamlit as st
@@ -10,7 +13,12 @@ import os
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from narration_engine import analyze_all_narrations, export_narration_report
+
+try:
+    from narration_engine import analyze_all_narrations, export_narration_report
+    NARRATION_ENGINE_AVAILABLE = True
+except ImportError:
+    NARRATION_ENGINE_AVAILABLE = False
 
 # New multi-layer pipeline (group-context + bank parser + regex)
 try:
@@ -18,6 +26,7 @@ try:
     PIPELINE_AVAILABLE = True
 except ImportError:
     PIPELINE_AVAILABLE = False
+
 from styles import (
     inject_base_styles, page_header, section_header, metric_card,
     badge, footer, fmt, fmt_full,
@@ -32,6 +41,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tally_data.d
 # -- Helpers ------------------------------------------------------------------
 
 def fmt_inr(amount):
+    """Format amount in Indian style. Safe for None/empty/non-numeric."""
     if amount is None:
         return "Rs 0"
     try:
@@ -51,7 +61,7 @@ def fmt_inr(amount):
 
 
 def severity_badge_html(severity):
-    s = (severity or "").upper()
+    s = (str(severity) if severity else "").upper()
     if s == "HIGH":
         return badge("HIGH", "red")
     elif s == "MEDIUM":
@@ -62,7 +72,7 @@ def severity_badge_html(severity):
 
 
 def severity_color(severity):
-    s = (severity or "").upper()
+    s = (str(severity) if severity else "").upper()
     if s == "HIGH":
         return "red"
     elif s == "MEDIUM":
@@ -72,19 +82,34 @@ def severity_color(severity):
 
 # -- Company name -------------------------------------------------------------
 
+COMPANY = "Company"
 try:
     import sqlite3
-    _conn = sqlite3.connect(DB_PATH)
-    _row = _conn.execute("SELECT value FROM _metadata WHERE key='company_name'").fetchone()
-    COMPANY = _row[0] if _row else "Company"
-    _conn.close()
+    if os.path.exists(DB_PATH):
+        _conn = sqlite3.connect(DB_PATH)
+        try:
+            _tables = [r[0] for r in _conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "_metadata" in _tables:
+                _row = _conn.execute("SELECT value FROM _metadata WHERE key='company_name'").fetchone()
+                COMPANY = _row[0] if _row else "Company"
+        except Exception:
+            pass
+        _conn.close()
 except Exception:
-    COMPANY = "Company"
+    pass
 
 
 # -- Header -------------------------------------------------------------------
 
 page_header("Narration Audit", f"Auto-classify voucher narrations and flag audit observations | {COMPANY}")
+
+
+# -- Check engine availability -----------------------------------------------
+
+if not NARRATION_ENGINE_AVAILABLE:
+    st.error("narration_engine module not found. Cannot run narration analysis.")
+    footer(COMPANY)
+    st.stop()
 
 
 # -- Session state ------------------------------------------------------------
@@ -114,170 +139,226 @@ with col_status:
 
 if run_clicked:
     with st.spinner("Analyzing narrations across all vouchers..."):
-        st.session_state.narration_results = analyze_all_narrations(DB_PATH)
+        try:
+            st.session_state.narration_results = analyze_all_narrations(DB_PATH)
+        except Exception as e:
+            st.error(f"Narration analysis failed: {e}")
+            st.session_state.narration_results = None
 
 results = st.session_state.narration_results
 if results is None:
     st.stop()
 
+if not isinstance(results, dict):
+    st.error("Unexpected result format from narration analysis.")
+    st.stop()
+
+# Check for engine-level errors
+if results.get("error"):
+    st.warning(f"Analysis completed with issues: {results['error']}")
+
 
 # -- Summary Metrics ----------------------------------------------------------
 
-section_header("OVERVIEW")
+try:
+    section_header("OVERVIEW")
 
-risk = results.get("risk_summary", {})
-total_flagged = risk.get("high", 0) + risk.get("medium", 0) + risk.get("low", 0)
+    risk = results.get("risk_summary", {})
+    if not isinstance(risk, dict):
+        risk = {}
+    total_flagged = (risk.get("high", 0) or 0) + (risk.get("medium", 0) or 0) + (risk.get("low", 0) or 0)
 
-m1, m2, m3, m4, m5 = st.columns(5)
-with m1:
-    metric_card("Total Vouchers", f"{results['total_vouchers']:,}", color_class="blue")
-with m2:
-    metric_card("Flagged", f"{total_flagged:,}",
-                sub=f"of {results['narrations_analyzed']:,} analyzed", color_class="amber")
-with m3:
-    metric_card("HIGH Severity", f"{risk.get('high', 0):,}", color_class="red")
-with m4:
-    metric_card("MEDIUM Severity", f"{risk.get('medium', 0):,}", color_class="amber")
-with m5:
-    metric_card("LOW Severity", f"{risk.get('low', 0):,}", color_class="green")
+    total_vouchers = results.get("total_vouchers", 0) or 0
+    narrations_analyzed = results.get("narrations_analyzed", 0) or 0
 
-st.markdown("")
+    # Safe: ensure we have at least 1 column worth of data
+    m1, m2, m3, m4, m5 = st.columns(5)
+    with m1:
+        metric_card("Total Vouchers", f"{total_vouchers:,}", color_class="blue")
+    with m2:
+        metric_card("Flagged", f"{total_flagged:,}",
+                    sub=f"of {narrations_analyzed:,} analyzed", color_class="amber")
+    with m3:
+        metric_card("HIGH Severity", f"{risk.get('high', 0) or 0:,}", color_class="red")
+    with m4:
+        metric_card("MEDIUM Severity", f"{risk.get('medium', 0) or 0:,}", color_class="amber")
+    with m5:
+        metric_card("LOW Severity", f"{risk.get('low', 0) or 0:,}", color_class="green")
 
-# No-narration callout
-if results.get("no_narration_count", 0) > 0:
-    st.warning(f"**{results['no_narration_count']}** vouchers have NO narration at all. "
-               "These need immediate attention -- transaction purpose is unclear.")
+    st.markdown("")
+
+    # No-narration callout
+    no_narr = results.get("no_narration_count", 0) or 0
+    if no_narr > 0:
+        st.warning(f"**{no_narr}** vouchers have NO narration at all. "
+                   "These need immediate attention -- transaction purpose is unclear.")
+except Exception as e:
+    st.warning(f"Could not render summary metrics: {e}")
 
 
 # -- Filters ------------------------------------------------------------------
 
-section_header("FLAGGED VOUCHERS")
+try:
+    section_header("FLAGGED VOUCHERS")
 
-fc1, fc2, fc3 = st.columns([1, 1, 2])
+    fc1, fc2, fc3 = st.columns([1, 1, 2])
 
-with fc1:
-    severity_filter = st.selectbox("Filter by Severity", ["All", "HIGH", "MEDIUM", "LOW"])
+    with fc1:
+        severity_filter = st.selectbox("Filter by Severity", ["All", "HIGH", "MEDIUM", "LOW"])
 
-# Build category list from results
-all_categories = sorted(results.get("category_summary", {}).keys())
-with fc2:
-    category_filter = st.selectbox("Filter by Category", ["All"] + all_categories)
+    # Build category list from results
+    cat_summary = results.get("category_summary", {})
+    if not isinstance(cat_summary, dict):
+        cat_summary = {}
+    all_categories = sorted(cat_summary.keys())
+    with fc2:
+        category_filter = st.selectbox("Filter by Category", ["All"] + all_categories)
 
-with fc3:
-    st.markdown("")  # spacer
+    with fc3:
+        st.markdown("")  # spacer
 
-flagged = results.get("flagged_vouchers", [])
+    flagged = results.get("flagged_vouchers", [])
+    if not isinstance(flagged, list):
+        flagged = []
 
-# Apply filters
-if severity_filter != "All":
-    flagged = [v for v in flagged if v["severity"] == severity_filter]
-if category_filter != "All":
-    flagged = [v for v in flagged if category_filter in v.get("categories", [])]
+    # Apply filters
+    if severity_filter != "All":
+        flagged = [v for v in flagged if isinstance(v, dict) and v.get("severity") == severity_filter]
+    if category_filter != "All":
+        flagged = [v for v in flagged if isinstance(v, dict) and category_filter in (v.get("categories") or [])]
+except Exception as e:
+    st.warning(f"Could not render filters: {e}")
+    flagged = []
 
 
 # -- Flagged Vouchers Table ---------------------------------------------------
 
-if not flagged:
-    st.info("No vouchers match the selected filters.")
-else:
-    st.markdown(f"Showing **{len(flagged):,}** flagged vouchers")
+try:
+    if not flagged:
+        st.info("No vouchers match the selected filters.")
+    else:
+        st.markdown(f"Showing **{len(flagged):,}** flagged vouchers")
 
-    # Build display dataframe
-    display_rows = []
-    for v in flagged:
-        display_rows.append({
-            "Date": v.get("date", ""),
-            "Type": v.get("voucher_type", ""),
-            "Number": v.get("voucher_number", ""),
-            "Party": v.get("party", ""),
-            "Amount": v.get("amount", 0),
-            "Narration": v.get("narration", "")[:120],
-            "Categories": ", ".join(v.get("categories", [])),
-            "Comments": "; ".join(v.get("comments", [])),
-            "Severity": v.get("severity", ""),
-        })
+        # Build display dataframe
+        display_rows = []
+        for v in flagged:
+            if not isinstance(v, dict):
+                continue
+            narration = v.get("narration", "") or ""
+            categories = v.get("categories", [])
+            comments = v.get("comments", [])
+            display_rows.append({
+                "Date": v.get("date", ""),
+                "Type": v.get("voucher_type", ""),
+                "Number": v.get("voucher_number", ""),
+                "Party": v.get("party", ""),
+                "Amount": v.get("amount", 0),
+                "Narration": str(narration)[:120],
+                "Categories": ", ".join(categories) if isinstance(categories, list) else str(categories),
+                "Comments": "; ".join(comments) if isinstance(comments, list) else str(comments),
+                "Severity": v.get("severity", ""),
+            })
 
-    df = pd.DataFrame(display_rows)
+        if display_rows:
+            df = pd.DataFrame(display_rows)
 
-    # Format amount column
-    df["Amount"] = df["Amount"].apply(lambda x: fmt_inr(x))
+            # Format amount column
+            if "Amount" in df.columns:
+                df["Amount"] = df["Amount"].apply(lambda x: fmt_inr(x))
 
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        height=min(600, 40 + len(df) * 35),
-        column_config={
-            "Narration": st.column_config.TextColumn(width="large"),
-            "Categories": st.column_config.TextColumn(width="medium"),
-            "Comments": st.column_config.TextColumn(width="large"),
-        },
-    )
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                height=min(600, 40 + len(df) * 35),
+                column_config={
+                    "Narration": st.column_config.TextColumn(width="large"),
+                    "Categories": st.column_config.TextColumn(width="medium"),
+                    "Comments": st.column_config.TextColumn(width="large"),
+                },
+            )
+except Exception as e:
+    st.warning(f"Could not render flagged vouchers table: {e}")
 
 
 # -- Category Breakdown -------------------------------------------------------
 
-section_header("CATEGORY-WISE BREAKDOWN")
+try:
+    section_header("CATEGORY-WISE BREAKDOWN")
 
-cat_summary = results.get("category_summary", {})
-if cat_summary:
-    # Sort by count descending
-    sorted_cats = sorted(cat_summary.items(), key=lambda x: -x[1]["count"])
+    if cat_summary:
+        # Sort by count descending
+        sorted_cats = sorted(cat_summary.items(), key=lambda x: -(x[1].get("count", 0) if isinstance(x[1], dict) else 0))
 
-    for cname, cdata in sorted_cats:
-        count = cdata["count"]
-        total_amt = cdata["total_amount"]
-        vouchers = cdata.get("vouchers", [])
+        for cname, cdata in sorted_cats:
+            if not isinstance(cdata, dict):
+                continue
+            count = cdata.get("count", 0) or 0
+            total_amt = cdata.get("total_amount", 0) or 0
+            vouchers = cdata.get("vouchers", [])
+            if not isinstance(vouchers, list):
+                vouchers = []
 
-        with st.expander(f"{cname} -- {count} voucher(s) | Total: {fmt_inr(total_amt)}"):
-            ec1, ec2 = st.columns(2)
-            with ec1:
-                st.markdown(f"**Voucher count:** {count}")
-            with ec2:
-                st.markdown(f"**Total amount:** {fmt_inr(total_amt)}")
+            with st.expander(f"{cname} -- {count} voucher(s) | Total: {fmt_inr(total_amt)}"):
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    st.markdown(f"**Voucher count:** {count}")
+                with ec2:
+                    st.markdown(f"**Total amount:** {fmt_inr(total_amt)}")
 
-            if vouchers:
-                cat_rows = []
-                for v in vouchers[:200]:
-                    cat_rows.append({
-                        "Date": v.get("date", ""),
-                        "Type": v.get("voucher_type", ""),
-                        "Number": v.get("voucher_number", ""),
-                        "Party": v.get("party", ""),
-                        "Amount": fmt_inr(v.get("amount", 0)),
-                        "Narration": v.get("narration", "")[:100],
-                    })
-                st.dataframe(
-                    pd.DataFrame(cat_rows),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(400, 40 + len(cat_rows) * 35),
-                )
-                if len(vouchers) > 200:
-                    st.caption(f"Showing 200 of {len(vouchers)} vouchers. Download Excel for full list.")
-else:
-    st.info("No categories detected.")
+                if vouchers:
+                    cat_rows = []
+                    for v in vouchers[:200]:
+                        if not isinstance(v, dict):
+                            continue
+                        cat_rows.append({
+                            "Date": v.get("date", ""),
+                            "Type": v.get("voucher_type", ""),
+                            "Number": v.get("voucher_number", ""),
+                            "Party": v.get("party", ""),
+                            "Amount": fmt_inr(v.get("amount", 0)),
+                            "Narration": str(v.get("narration", ""))[:100],
+                        })
+                    if cat_rows:
+                        st.dataframe(
+                            pd.DataFrame(cat_rows),
+                            use_container_width=True,
+                            hide_index=True,
+                            height=min(400, 40 + len(cat_rows) * 35),
+                        )
+                    if len(vouchers) > 200:
+                        st.caption(f"Showing 200 of {len(vouchers)} vouchers. Download Excel for full list.")
+    else:
+        st.info("No categories detected.")
+except Exception as e:
+    st.warning(f"Could not render category breakdown: {e}")
 
 
 # -- Download Excel -----------------------------------------------------------
 
-section_header("EXPORT")
+try:
+    section_header("EXPORT")
 
-if st.button("Download Excel Report"):
-    with st.spinner("Generating Excel report..."):
-        tmp_path = os.path.join(tempfile.gettempdir(), "narration_audit_report.xlsx")
-        export_narration_report(results, tmp_path)
+    if st.button("Download Excel Report"):
+        with st.spinner("Generating Excel report..."):
+            try:
+                tmp_path = os.path.join(tempfile.gettempdir(), "narration_audit_report.xlsx")
+                export_narration_report(results, tmp_path)
 
-        with open(tmp_path, "rb") as f:
-            excel_bytes = f.read()
+                with open(tmp_path, "rb") as f:
+                    excel_bytes = f.read()
 
-        st.download_button(
-            label="Save Narration Audit Report (.xlsx)",
-            data=excel_bytes,
-            file_name="narration_audit_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        st.success("Report generated. Click above to save.")
+                st.download_button(
+                    label="Save Narration Audit Report (.xlsx)",
+                    data=excel_bytes,
+                    file_name="narration_audit_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                st.success("Report generated. Click above to save.")
+            except Exception as e:
+                st.error(f"Failed to generate Excel report: {e}")
+except Exception as e:
+    st.warning(f"Could not render export section: {e}")
 
 
 # -- Footer -------------------------------------------------------------------

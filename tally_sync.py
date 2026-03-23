@@ -542,10 +542,15 @@ def sync_all(host, port=9000, db_path="tally_data.db", progress_callback=None):
     # Try GSTIN from company info first, then fall back to voucher data
     gstin = company_info.get("GSTIN", "")
     if not gstin:
-        row = conn.execute(
-            "SELECT CMPGSTIN FROM trn_voucher WHERE CMPGSTIN IS NOT NULL AND CMPGSTIN != '' LIMIT 1"
-        ).fetchone()
-        gstin = row[0] if row else ""
+        try:
+            vch_cols = {r[1] for r in conn.execute("PRAGMA table_info(trn_voucher)").fetchall()}
+            if "CMPGSTIN" in vch_cols:
+                row = conn.execute(
+                    "SELECT CMPGSTIN FROM trn_voucher WHERE CMPGSTIN IS NOT NULL AND CMPGSTIN != '' LIMIT 1"
+                ).fetchone()
+                gstin = row[0] if row else ""
+        except sqlite3.OperationalError:
+            pass
     if gstin:
         conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("company_gstin", gstin))
     if company_info.get("STATENAME"):

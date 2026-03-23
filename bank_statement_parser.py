@@ -326,20 +326,15 @@ def classify_bank_transaction(parsed, voucher_type, debit_groups, credit_groups)
 
 def fuzzy_match_party(extracted_name, ledger_names, threshold=80):
     """Match a truncated bank narration party name to known ledger names.
-
-    Uses simple substring + length-ratio matching (no external dependency).
-    For better results, install rapidfuzz: pip install rapidfuzz
-
-    Args:
-        extracted_name: Party name from bank narration (often truncated)
-        ledger_names: List of known ledger names from mst_ledger
-        threshold: Minimum similarity score (0-100)
+    DEFENSIVE: Handles None inputs, empty lists, non-string values safely.
 
     Returns:
         dict with: matched_ledger, score, method
         or None if no match found.
     """
-    if not extracted_name or len(extracted_name) < 3:
+    if not extracted_name or not isinstance(extracted_name, str) or len(extracted_name.strip()) < 3:
+        return None
+    if not ledger_names or not isinstance(ledger_names, (list, tuple)):
         return None
 
     name_upper = extracted_name.upper().strip()

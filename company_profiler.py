@@ -2,11 +2,17 @@
 Seven Labs Vision — Company Profiler (Layer 1)
 Auto-detects entity type, business nature, industry, and complexity from Tally data.
 Runs after every sync and stores the profile in SQLite.
+
+DEFENSIVE: Handles missing tables, missing columns, very small/large companies.
 """
 
 import sqlite3
 import re
 from collections import Counter
+from defensive_helpers import (
+    table_exists, column_exists, get_table_columns,
+    safe_fetchone, safe_fetchall, safe_float, safe_divide
+)
 
 
 def profile_company(db_path="tally_data.db"):
@@ -14,9 +20,19 @@ def profile_company(db_path="tally_data.db"):
     Analyze the Tally data and return a comprehensive company profile.
     Returns a dict with: entity_type, business_nature, industry, complexity, and detailed signals.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+    except Exception as e:
+        return {
+            "entity_type": "Unknown", "business_nature": "Unknown",
+            "industry": "General", "complexity": "Unknown",
+            "complexity_score": 0, "company_name": "",
+            "gstin": "", "gst_registration_type": "", "state": "",
+            "signals": {}, "features": {}, "stats": {},
+            "recommendations": [], "error": str(e),
+        }
 
     profile = {
         "entity_type": None,          # Proprietorship | Partnership | LLP | Pvt Ltd | Public Ltd | Trust | HUF
@@ -36,32 +52,56 @@ def profile_company(db_path="tally_data.db"):
 
     # ── GET COMPANY BASICS ──
     try:
-        cur.execute("SELECT value FROM _metadata WHERE key='company_name'")
-        row = cur.fetchone()
-        if row:
-            profile["company_name"] = row[0]
-    except:
+        if table_exists(conn, "_metadata"):
+            cur.execute("SELECT value FROM _metadata WHERE key='company_name'")
+            row = cur.fetchone()
+            if row:
+                profile["company_name"] = row[0]
+    except Exception:
         pass
 
     # Get GSTIN and registration type from first voucher
     try:
-        cur.execute("SELECT CMPGSTIN, CMPGSTREGISTRATIONTYPE, CMPGSTSTATE FROM trn_voucher WHERE CMPGSTIN IS NOT NULL AND CMPGSTIN != '' LIMIT 1")
-        row = cur.fetchone()
-        if row:
-            profile["gstin"] = row["CMPGSTIN"] or ""
-            profile["gst_registration_type"] = row["CMPGSTREGISTRATIONTYPE"] or ""
-            profile["state"] = row["CMPGSTSTATE"] or ""
-    except:
+        if table_exists(conn, "trn_voucher"):
+            voucher_cols = get_table_columns(conn, "trn_voucher")
+            gstin_cols = []
+            if "CMPGSTIN" in voucher_cols:
+                gstin_cols.append("CMPGSTIN")
+            if "CMPGSTREGISTRATIONTYPE" in voucher_cols:
+                gstin_cols.append("CMPGSTREGISTRATIONTYPE")
+            if "CMPGSTSTATE" in voucher_cols:
+                gstin_cols.append("CMPGSTSTATE")
+            if gstin_cols:
+                sql = f"SELECT {', '.join(gstin_cols)} FROM trn_voucher WHERE "
+                if "CMPGSTIN" in voucher_cols:
+                    sql += "CMPGSTIN IS NOT NULL AND CMPGSTIN != '' "
+                else:
+                    sql += "1=1 "
+                sql += "LIMIT 1"
+                cur.execute(sql)
+                row = cur.fetchone()
+                if row:
+                    if "CMPGSTIN" in voucher_cols:
+                        profile["gstin"] = (row["CMPGSTIN"] or "") if "CMPGSTIN" in gstin_cols else ""
+                    if "CMPGSTREGISTRATIONTYPE" in voucher_cols:
+                        profile["gst_registration_type"] = (row["CMPGSTREGISTRATIONTYPE"] or "") if "CMPGSTREGISTRATIONTYPE" in gstin_cols else ""
+                    if "CMPGSTSTATE" in voucher_cols:
+                        profile["state"] = (row["CMPGSTSTATE"] or "") if "CMPGSTSTATE" in gstin_cols else ""
+    except Exception:
         pass
 
     # ── VOLUME STATISTICS ──
     stats = {}
-    for table in ["mst_group", "mst_ledger", "mst_stock_item", "mst_godown", "mst_voucher_type", "trn_voucher", "trn_accounting"]:
+    for tbl in ["mst_group", "mst_ledger", "mst_stock_item", "mst_godown", "mst_voucher_type", "trn_voucher", "trn_accounting"]:
         try:
-            cur.execute(f"SELECT COUNT(*) FROM {table}")
-            stats[table] = cur.fetchone()[0]
-        except:
-            stats[table] = 0
+            if table_exists(conn, tbl):
+                cur.execute(f"SELECT COUNT(*) FROM {tbl}")
+                row = cur.fetchone()
+                stats[tbl] = row[0] if row else 0
+            else:
+                stats[tbl] = 0
+        except Exception:
+            stats[tbl] = 0
 
     profile["stats"] = stats
 
@@ -248,8 +288,11 @@ def _detect_business_nature(cur, profile):
         signals["voucher_types"] = [v[0] for v in vtypes]
 
         # Only count manufacturing if types are ACTUALLY USED in vouchers
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(MFGJOURNAL) = 'YES'")
-        mfg_vch_count = cur.fetchone()[0]
+        mfg_vch_count = 0
+        if column_exists(conn, "trn_voucher", "MFGJOURNAL"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(MFGJOURNAL) = 'YES'")
+            row = cur.fetchone()
+            mfg_vch_count = row[0] if row else 0
         if mfg_vch_count > 0:
             scores["Manufacturing"] += 10  # Strong signal — actual manufacturing entries
             signals["manufacturing_voucher_count"] = mfg_vch_count
@@ -317,12 +360,14 @@ def _detect_business_nature(cur, profile):
 
     # Signal 5: ISCOSTCENTRE flag — project/service tracking
     try:
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE) = 'YES'")
-        cost_centre_vch = cur.fetchone()[0]
-        if cost_centre_vch > 0:
-            scores["Service"] += 2
-            signals["cost_centre_vouchers"] = cost_centre_vch
-    except:
+        if column_exists(conn, "trn_voucher", "ISCOSTCENTRE"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE) = 'YES'")
+            row = cur.fetchone()
+            cost_centre_vch = row[0] if row else 0
+            if cost_centre_vch > 0:
+                scores["Service"] += 2
+                signals["cost_centre_vouchers"] = cost_centre_vch
+    except Exception:
         pass
 
     # Determine result
@@ -354,11 +399,17 @@ def _detect_industry(cur, profile):
 
     # ── PHARMA ──
     try:
-        # Check batch tracking / expiry
-        cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
-        batch_items = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISPERISHABLEON)='YES'")
-        perishable_items = cur.fetchone()[0]
+        # Check batch tracking / expiry (columns may not exist in all databases)
+        batch_items = 0
+        perishable_items = 0
+        if column_exists(conn, "mst_stock_item", "ISBATCHWISEON"):
+            cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
+            row = cur.fetchone()
+            batch_items = row[0] if row else 0
+        if column_exists(conn, "mst_stock_item", "ISPERISHABLEON"):
+            cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISPERISHABLEON)='YES'")
+            row = cur.fetchone()
+            perishable_items = row[0] if row else 0
 
         if batch_items > 0:
             scores["Pharma"] += 3
@@ -451,8 +502,11 @@ def _detect_industry(cur, profile):
 
     # ── TRANSPORT ──
     try:
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(USETRACKINGNUMBER)='YES'")
-        tracking = cur.fetchone()[0]
+        tracking = 0
+        if column_exists(conn, "trn_voucher", "USETRACKINGNUMBER"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(USETRACKINGNUMBER)='YES'")
+            row = cur.fetchone()
+            tracking = row[0] if row else 0
         if tracking > 0:
             scores["Transport"] += 5
             signals["tracking_number_vouchers"] = tracking
@@ -603,32 +657,38 @@ def _detect_complexity(cur, profile):
 
     # Cost centres used
     try:
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE)='YES'")
-        cc_count = cur.fetchone()[0]
-        if cc_count > 0:
-            score += 1
-            features["cost_centres_used"] = f"{cc_count} vouchers with cost centres"
-    except:
+        if column_exists(conn, "trn_voucher", "ISCOSTCENTRE"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE)='YES'")
+            row = cur.fetchone()
+            cc_count = row[0] if row else 0
+            if cc_count > 0:
+                score += 1
+                features["cost_centres_used"] = f"{cc_count} vouchers with cost centres"
+    except Exception:
         pass
 
     # Batch tracking
     try:
-        cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
-        batch = cur.fetchone()[0]
-        if batch > 0:
-            score += 1
-            features["batch_tracking"] = f"{batch} items with batches"
-    except:
+        if column_exists(conn, "mst_stock_item", "ISBATCHWISEON"):
+            cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
+            row = cur.fetchone()
+            batch = row[0] if row else 0
+            if batch > 0:
+                score += 1
+                features["batch_tracking"] = f"{batch} items with batches"
+    except Exception:
         pass
 
     # GST complexity — multiple tax rates
     try:
-        cur.execute("SELECT COUNT(DISTINCT GSTTAXRATE) FROM trn_accounting WHERE GSTTAXRATE IS NOT NULL AND GSTTAXRATE != ''")
-        tax_rates = cur.fetchone()[0]
-        if tax_rates > 3:
-            score += 1
-            features["multi_gst_rates"] = f"{tax_rates} distinct GST rates"
-    except:
+        if column_exists(conn, "trn_accounting", "GSTTAXRATE"):
+            cur.execute("SELECT COUNT(DISTINCT GSTTAXRATE) FROM trn_accounting WHERE GSTTAXRATE IS NOT NULL AND GSTTAXRATE != ''")
+            row = cur.fetchone()
+            tax_rates = row[0] if row else 0
+            if tax_rates > 3:
+                score += 1
+                features["multi_gst_rates"] = f"{tax_rates} distinct GST rates"
+    except Exception:
         pass
 
     # Bank accounts
@@ -726,30 +786,35 @@ def _generate_recommendations(profile):
 def _save_profile(conn, profile):
     """Save the profile to _company_profile table in the database."""
     import json
-    cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS _company_profile")
-    cur.execute("""
-        CREATE TABLE _company_profile (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    for key in ["company_name", "entity_type", "business_nature", "industry",
-                 "complexity", "complexity_score", "gstin", "gst_registration_type", "state"]:
+    try:
+        cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS _company_profile")
+        cur.execute("""
+            CREATE TABLE _company_profile (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        for key in ["company_name", "entity_type", "business_nature", "industry",
+                     "complexity", "complexity_score", "gstin", "gst_registration_type", "state"]:
+            cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                        (key, str(profile.get(key, ""))))
+
+        # Store detailed data as JSON
         cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                    (key, str(profile.get(key, ""))))
+                    ("signals", json.dumps(profile.get("signals", {}), default=str)))
+        cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                    ("features", json.dumps(profile.get("features", {}), default=str)))
+        cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                    ("stats", json.dumps(profile.get("stats", {}), default=str)))
+        cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                    ("recommendations", json.dumps(profile.get("recommendations", []), default=str)))
 
-    # Store detailed data as JSON
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("signals", json.dumps(profile.get("signals", {}), default=str)))
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("features", json.dumps(profile.get("features", {}), default=str)))
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("stats", json.dumps(profile.get("stats", {}), default=str)))
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("recommendations", json.dumps(profile.get("recommendations", []), default=str)))
-
-    conn.commit()
+        conn.commit()
+    except Exception as e:
+        # If saving fails (e.g. read-only DB), just log and continue
+        import logging
+        logging.getLogger(__name__).warning(f"Could not save profile to DB: {e}")
 
 
 def load_profile(db_path="tally_data.db"):

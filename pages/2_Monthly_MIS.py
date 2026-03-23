@@ -26,13 +26,38 @@ inject_base_styles()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tally_data.db")
 
+
+def _safe_parse_date(date_str, fallback=None):
+    """Safely parse YYYYMMDD date string."""
+    try:
+        if date_str and len(date_str) >= 8:
+            return datetime.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+    except (ValueError, TypeError):
+        pass
+    return fallback
+
+
+def _safe_div(a, b, default=0):
+    """Safe division -- returns default if b is 0 or None."""
+    if not b:
+        return default
+    return a / b
+
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
 # ── GLOBAL DATE FILTER ──
 _conn_dates = sqlite3.connect(DB_PATH)
 _min_date_row = _conn_dates.execute("SELECT MIN(DATE) FROM trn_voucher").fetchone()
 _max_date_row = _conn_dates.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
 _conn_dates.close()
-_min_dt = datetime.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else datetime.date(2025, 4, 1)
-_max_dt = datetime.date(int(_max_date_row[0][:4]), int(_max_date_row[0][4:6]), int(_max_date_row[0][6:8])) if _max_date_row and _max_date_row[0] else datetime.date.today()
+_min_dt = _safe_parse_date(_min_date_row[0] if _min_date_row else None, fallback=datetime.date(2025, 4, 1))
+_max_dt = _safe_parse_date(_max_date_row[0] if _max_date_row else None, fallback=datetime.date.today())
 if "global_start_date" not in st.session_state:
     st.session_state.global_start_date = _min_dt
 if "global_end_date" not in st.session_state:
@@ -160,7 +185,7 @@ def sparkline_bar(values, width=80, height=20):
     if not values or all(v == 0 for v in values):
         return ""
     max_val = max(abs(v) for v in values if v != 0)
-    bar_width = width / len(values)
+    bar_width = _safe_div(width, len(values), default=width)
     bars = []
     for i, v in enumerate(values):
         bar_h = abs(v) / max_val * height if max_val > 0 else 0
@@ -433,7 +458,7 @@ def drill_gross_profit(month_code, data):
         rows_data.append(("Less: Direct Expenses", -direct_total))
     rows_data.append(("GROSS PROFIT", gp))
     if sales_amt > 0:
-        rows_data.append(("Gross Margin %", gp / sales_amt * 100))
+        rows_data.append(("Gross Margin %", _safe_div(gp, sales_amt) * 100))
 
     df = pd.DataFrame(rows_data, columns=["Line Item", "Amount"])
     return df
@@ -506,7 +531,7 @@ def build_pnl(data, months):
 
     # Gross Margin %
     pnl["Gross Margin %"] = [
-        (gp[i] / pnl["Revenue (Net Sales)"][i] * 100) if pnl["Revenue (Net Sales)"][i] > 0 else 0
+        _safe_div(gp[i], pnl["Revenue (Net Sales)"][i]) * 100
         for i in range(len(months))
     ]
 
@@ -537,7 +562,7 @@ def build_pnl(data, months):
 
     # Operating Margin %
     pnl["Operating Margin %"] = [
-        (ebitda[i] / pnl["Revenue (Net Sales)"][i] * 100) if pnl["Revenue (Net Sales)"][i] > 0 else 0
+        _safe_div(ebitda[i], pnl["Revenue (Net Sales)"][i]) * 100
         for i in range(len(months))
     ]
 
@@ -747,7 +772,7 @@ def render_drill_view(data, months, pnl, sorted_ledgers):
                     st.markdown(f"**Current Month Revenue ({month_lbl}):** {fmt_indian(rev, prefix='₹')}")
                     prev_lbl = month_label(months[idx - 1])
                     st.markdown(f"**Previous Month Revenue ({prev_lbl}):** {fmt_indian(prev_rev, prefix='₹')}")
-                    result = ((rev / prev_rev) - 1) * 100 if prev_rev > 0 else 0
+                    result = (_safe_div(rev, prev_rev) - 1) * 100 if prev_rev > 0 else 0
                     st.markdown(f"### Result: {fmt_pct(result)}")
                 else:
                     st.info("No previous month available for comparison.")
@@ -826,8 +851,8 @@ def main():
     ytd_revenue = sum(pnl["Revenue (Net Sales)"])
     ytd_profit = sum(pnl["NET PROFIT / (LOSS)"])
     ytd_gp = sum(pnl["GROSS PROFIT"])
-    avg_monthly_rev = ytd_revenue / len(months)
-    avg_gp_margin = ytd_gp / ytd_revenue * 100 if ytd_revenue > 0 else 0
+    avg_monthly_rev = _safe_div(ytd_revenue, len(months))
+    avg_gp_margin = _safe_div(ytd_gp, ytd_revenue) * 100
 
     rev_list = pnl["Revenue (Net Sales)"]
     best_month_idx = rev_list.index(max(rev_list))
@@ -845,9 +870,9 @@ def main():
         elif b[1] == "Bank OD A/c":
             cash_balance -= abs(closing)
 
-    avg_monthly_burn = abs(sum(pnl["TOTAL OPERATING EXPENSES"])) / len(months)
-    avg_monthly_net_outflow = abs(ytd_profit / len(months)) if ytd_profit < 0 else 0
-    cash_runway = cash_balance / avg_monthly_net_outflow if avg_monthly_net_outflow > 0 else float('inf')
+    avg_monthly_burn = _safe_div(abs(sum(pnl["TOTAL OPERATING EXPENSES"])), len(months))
+    avg_monthly_net_outflow = _safe_div(abs(ytd_profit), len(months)) if ytd_profit < 0 else 0
+    cash_runway = _safe_div(cash_balance, avg_monthly_net_outflow, default=float('inf'))
 
     section_header("EXECUTIVE SUMMARY")
 
@@ -857,7 +882,7 @@ def main():
         metric_card("YTD Revenue", fmt_lakhs(ytd_revenue), sub=f"{len(months)} months", color_class="blue")
     with cols[1]:
         metric_card("YTD Net Profit/Loss", fmt_lakhs(ytd_profit),
-                     sub=f"Net Margin: {fmt_pct(ytd_profit / ytd_revenue * 100 if ytd_revenue else 0)}",
+                     sub=f"Net Margin: {fmt_pct(_safe_div(ytd_profit, ytd_revenue) * 100)}",
                      color_class=profit_color)
     with cols[2]:
         metric_card("Avg Monthly Revenue", fmt_lakhs(avg_monthly_rev),
@@ -979,7 +1004,7 @@ def main():
         # YTD column
         ytd_val = sum(values)
         if is_pct:
-            ytd_val = sum(values) / len(values) if values else 0
+            ytd_val = _safe_div(sum(values), len(values))
             ytd_cell = fmt_pct(ytd_val)
             ytd_color = "#10b981" if ytd_val > 0 else "#ef4444"
         else:
@@ -1069,12 +1094,12 @@ def main():
             inv_count = data["invoice_counts"].get(m, 1)
             receipts_val = data["receipts"].get(m, 0)
 
-            gp_m = (gp_val / rev * 100) if rev > 0 else 0
-            op_m = (ebitda_val / rev * 100) if rev > 0 else 0
-            np_m = (np_val / rev * 100) if rev > 0 else 0
-            mom_growth = ((rev / pnl["Revenue (Net Sales)"][i - 1]) - 1) * 100 if i > 0 and pnl["Revenue (Net Sales)"][i - 1] > 0 else 0
-            rev_per_inv = rev / inv_count if inv_count > 0 else 0
-            collection_eff = (receipts_val / rev * 100) if rev > 0 else 0
+            gp_m = _safe_div(gp_val, rev) * 100
+            op_m = _safe_div(ebitda_val, rev) * 100
+            np_m = _safe_div(np_val, rev) * 100
+            mom_growth = (_safe_div(rev, pnl["Revenue (Net Sales)"][i - 1]) - 1) * 100 if i > 0 and pnl["Revenue (Net Sales)"][i - 1] > 0 else 0
+            rev_per_inv = _safe_div(rev, inv_count)
+            collection_eff = _safe_div(receipts_val, rev) * 100
 
             ratio_data.append({
                 "Month": month_label(m),
@@ -1105,42 +1130,47 @@ def main():
 
     with col2:
         # Concentration & Working Capital
-        st.markdown("**Customer Concentration (Top 5)** — click a customer to see invoices")
+        st.markdown("**Customer Concentration (Top 5)** -- click a customer to see invoices")
         total_sales_val = sum(pnl["Revenue (Net Sales)"])
-        top5_total = sum(c[1] for c in data["top5_customers"])
-        conc_pct = (top5_total / total_sales_val * 100) if total_sales_val > 0 else 0
+        _top5 = data.get("top5_customers") or []
 
-        conc_html = '<table class="slv-table">'
-        conc_html += '<tr><th style="text-align:left;">Customer</th><th>Revenue</th><th>% Share</th></tr>'
-        for cust, amt in data["top5_customers"]:
-            share = amt / total_sales_val * 100 if total_sales_val > 0 else 0
-            short_name = cust[:30] + "..." if len(cust) > 30 else cust
-            bar_w = share / conc_pct * 100 if conc_pct > 0 else 0
-            conc_html += f'<tr><td style="padding:5px 10px;border-bottom:1px solid #e2e8f0;font-size:0.78rem;">{short_name}</td>'
-            conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_lakhs(amt)}</td>'
-            conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_pct(share)}</td></tr>'
-        conc_html += f'<tr style="background:#f8fafc;font-weight:700;"><td style="padding:6px 10px;">Top 5 Total</td><td style="padding:6px 10px;text-align:right;">{fmt_lakhs(top5_total)}</td><td style="padding:6px 10px;text-align:right;">{fmt_pct(conc_pct)}</td></tr>'
-        conc_html += '</table>'
-        st.markdown(conc_html, unsafe_allow_html=True)
+        if _top5:
+            top5_total = sum(c[1] for c in _top5)
+            conc_pct = _safe_div(top5_total, total_sales_val) * 100
 
-        # Customer drill buttons
-        cust_cols = st.columns(max(min(len(data["top5_customers"]), 5), 1))
-        for idx_c, (cust, amt) in enumerate(data["top5_customers"]):
-            short = cust[:18] + ".." if len(cust) > 18 else cust
-            with cust_cols[idx_c]:
-                if st.button(f"{short}", key=f"cust_drill_{idx_c}"):
-                    go_drill("customer", party=cust)
-                    st.rerun()
+            conc_html = '<table class="slv-table">'
+            conc_html += '<tr><th style="text-align:left;">Customer</th><th>Revenue</th><th>% Share</th></tr>'
+            for cust, amt in _top5:
+                share = _safe_div(amt, total_sales_val) * 100
+                short_name = cust[:30] + "..." if len(cust) > 30 else cust
+                conc_html += f'<tr><td style="padding:5px 10px;border-bottom:1px solid #e2e8f0;font-size:0.78rem;">{short_name}</td>'
+                conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_lakhs(amt)}</td>'
+                conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_pct(share)}</td></tr>'
+            conc_html += f'<tr style="background:#f8fafc;font-weight:700;"><td style="padding:6px 10px;">Top 5 Total</td><td style="padding:6px 10px;text-align:right;">{fmt_lakhs(top5_total)}</td><td style="padding:6px 10px;text-align:right;">{fmt_pct(conc_pct)}</td></tr>'
+            conc_html += '</table>'
+            st.markdown(conc_html, unsafe_allow_html=True)
+
+            # Customer drill buttons
+            _num_cust_cols = max(min(len(_top5), 5), 1)
+            cust_cols = st.columns(_num_cust_cols)
+            for idx_c, (cust, amt) in enumerate(_top5[:_num_cust_cols]):
+                short = cust[:18] + ".." if len(cust) > 18 else cust
+                with cust_cols[idx_c]:
+                    if st.button(f"{short}", key=f"cust_drill_{idx_c}"):
+                        go_drill("customer", party=cust)
+                        st.rerun()
+        else:
+            st.info("No customer data available for this period.")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         # Working Capital Cycle
         st.markdown("**Working Capital Cycle**")
-        annualized_sales = total_sales_val / len(months) * 12
-        annualized_purchases = sum(pnl["Less: COGS (Purchases)"]) / len(months) * 12
+        annualized_sales = _safe_div(total_sales_val, len(months)) * 12
+        annualized_purchases = _safe_div(sum(pnl["Less: COGS (Purchases)"]), len(months)) * 12
 
-        debtor_days = (data["total_debtors"] / annualized_sales * 365) if annualized_sales > 0 else 0
-        creditor_days = (data["total_creditors"] / annualized_purchases * 365) if annualized_purchases > 0 else 0
+        debtor_days = _safe_div(data.get("total_debtors", 0), annualized_sales) * 365
+        creditor_days = _safe_div(data.get("total_creditors", 0), annualized_purchases) * 365
         wc_cycle = debtor_days - creditor_days
 
         wc_html = f"""
@@ -1190,7 +1220,7 @@ def main():
     cm_html += f'<td style="padding:6px 8px;text-align:right;font-weight:700;background:#f8fafc;color:{"#10b981" if ytd_cm >= 0 else "#ef4444"}">{fmt_lakhs(ytd_cm)}</td></tr>'
 
     # CM %
-    cm_pcts = [(cm_values[i] / pnl["Revenue (Net Sales)"][i] * 100) if pnl["Revenue (Net Sales)"][i] > 0 else 0 for i in range(len(months))]
+    cm_pcts = [_safe_div(cm_values[i], pnl["Revenue (Net Sales)"][i]) * 100 for i in range(len(months))]
     cm_html += '<tr style="background:#f8fafc;"><td style="padding:5px 12px;color:#64748b;">Contribution Margin %</td>'
     for v in cm_pcts:
         color = "#10b981" if v >= 0 else "#ef4444"
@@ -1206,13 +1236,13 @@ def main():
     cm_html += f'<td style="padding:5px 8px;text-align:right;font-weight:700;color:#ef4444;background:#f8fafc;">({fmt_lakhs(sum(fc_values))})</td></tr>'
 
     # Fixed Cost Coverage Ratio
-    coverage = [(cm_values[i] / fc_values[i]) if fc_values[i] > 0 else 0 for i in range(len(months))]
+    coverage = [_safe_div(cm_values[i], fc_values[i]) for i in range(len(months))]
     cm_html += '<tr style="background:#fef3c7;border-top:2px solid #f59e0b;"><td style="padding:6px 12px;font-weight:700;">Fixed Cost Coverage Ratio</td>'
     for v in coverage:
         color = "#10b981" if v >= 1 else "#ef4444"
         display = f"{v:.1f}x" if v != 0 else "—"
         cm_html += f'<td style="padding:6px 6px;text-align:right;font-weight:600;color:{color};">{display}</td>'
-    avg_cov = sum(cm_values) / sum(fc_values) if sum(fc_values) > 0 else 0
+    avg_cov = _safe_div(sum(cm_values), sum(fc_values))
     cm_html += f'<td style="padding:6px 8px;text-align:right;font-weight:700;background:#f8fafc;color:{"#10b981" if avg_cov >= 1 else "#ef4444"}">{avg_cov:.1f}x</td></tr>'
 
     cm_html += '</table>'
@@ -1280,7 +1310,7 @@ def main():
     with col_a:
         burn_months = [(month_labels[i], pnl["NET PROFIT / (LOSS)"][i])
                        for i in range(len(months)) if pnl["NET PROFIT / (LOSS)"][i] < 0]
-        avg_burn = abs(sum(v for _, v in burn_months) / len(burn_months)) if burn_months else 0
+        avg_burn = abs(_safe_div(sum(v for _, v in burn_months), len(burn_months))) if burn_months else 0
 
         st.markdown("**Monthly Burn Rate**")
         burn_html = f"""
@@ -1313,10 +1343,10 @@ def main():
         for i, m in enumerate(months):
             rev = pnl["Revenue (Net Sales)"][i]
             rcpt = data["receipts"].get(m, 0)
-            eff = (rcpt / rev * 100) if rev > 0 else 0
+            eff = _safe_div(rcpt, rev) * 100
             coll_eff_data.append(eff)
 
-        avg_coll = sum(coll_eff_data) / len(coll_eff_data) if coll_eff_data else 0
+        avg_coll = _safe_div(sum(coll_eff_data), len(coll_eff_data)) if coll_eff_data else 0
 
         coll_html = f"""
         <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:1rem;text-align:center;">

@@ -104,32 +104,71 @@ def _primary_category(narration: str, party: str = "") -> tuple[str, float]:
 
 # ── POPULATE / SYNC ──────────────────────────────────────────────────────────
 
+def _has_table_nt(conn, table_name):
+    """Check if a table exists."""
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return (row[0] if row else 0) > 0
+    except Exception:
+        return False
+
+
+def _has_column_nt(conn, table_name, column_name):
+    """Check if a column exists in a table."""
+    try:
+        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return any(c[1].upper() == column_name.upper() for c in (cols or []))
+    except Exception:
+        return False
+
+
 def sync_training_table(db_path: str) -> int:
     """Populate _narration_training from trn_voucher for any new GUIDs.
-
+    DEFENSIVE: Handles missing trn_voucher, missing NARRATION column, empty data.
     Returns the number of new rows inserted.
     """
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return 0
     conn.row_factory = sqlite3.Row
     _ensure_table(conn)
 
-    # Get existing GUIDs
-    existing = set(
-        r[0] for r in conn.execute("SELECT guid FROM _narration_training").fetchall()
-    )
+    # Check required tables/columns exist
+    if not _has_table_nt(conn, "trn_voucher"):
+        conn.close()
+        return 0
+    if not _has_column_nt(conn, "trn_voucher", "NARRATION"):
+        conn.close()
+        return 0
 
-    rows = conn.execute("""
-        SELECT
-            v.GUID, v.DATE, v.VOUCHERTYPENAME, v.PARTYLEDGERNAME, v.NARRATION,
-            COALESCE(
-                (SELECT SUM(ABS(CAST(a.AMOUNT AS REAL)))
-                 FROM trn_accounting a
-                 WHERE a.VOUCHER_GUID = v.GUID AND CAST(a.AMOUNT AS REAL) > 0),
-                0
-            ) AS amount
-        FROM trn_voucher v
-        WHERE v.NARRATION IS NOT NULL AND v.NARRATION != ''
-    """).fetchall()
+    # Get existing GUIDs
+    try:
+        existing = set(
+            r[0] for r in (conn.execute("SELECT guid FROM _narration_training").fetchall() or [])
+        )
+    except Exception:
+        existing = set()
+
+    try:
+        rows = conn.execute("""
+            SELECT
+                v.GUID, v.DATE, v.VOUCHERTYPENAME, v.PARTYLEDGERNAME, v.NARRATION,
+                COALESCE(
+                    (SELECT SUM(ABS(CAST(a.AMOUNT AS REAL)))
+                     FROM trn_accounting a
+                     WHERE a.VOUCHER_GUID = v.GUID AND CAST(a.AMOUNT AS REAL) > 0),
+                    0
+                ) AS amount
+            FROM trn_voucher v
+            WHERE v.NARRATION IS NOT NULL AND v.NARRATION != ''
+        """).fetchall() or []
+    except Exception:
+        conn.close()
+        return 0
 
     inserted = 0
     for row in rows:
@@ -315,36 +354,53 @@ def skip_narration(db_path: str, guid: str):
 # ── STATS ────────────────────────────────────────────────────────────────────
 
 def get_training_stats(db_path: str) -> dict:
-    """Get stats: total, reviewed, verified, corrected, skipped, accuracy, categories."""
-    conn = sqlite3.connect(db_path)
+    """Get stats: total, reviewed, verified, corrected, skipped, accuracy, categories.
+    DEFENSIVE: Never crashes. Returns safe defaults on any failure.
+    """
+    _default_stats = {
+        "total": 0, "reviewed": 0, "verified": 0, "corrected": 0,
+        "skipped": 0, "unreviewed": 0, "accuracy": 0.0,
+        "regex_categories": 0, "human_categories": 0,
+    }
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return _default_stats
     _ensure_table(conn)
 
-    total = conn.execute("SELECT COUNT(*) FROM _narration_training").fetchone()[0]
-    verified = conn.execute(
-        "SELECT COUNT(*) FROM _narration_training WHERE status = 'verified'"
-    ).fetchone()[0]
-    corrected = conn.execute(
-        "SELECT COUNT(*) FROM _narration_training WHERE status = 'corrected'"
-    ).fetchone()[0]
-    skipped = conn.execute(
-        "SELECT COUNT(*) FROM _narration_training WHERE status = 'skipped'"
-    ).fetchone()[0]
-    unreviewed = conn.execute(
-        "SELECT COUNT(*) FROM _narration_training WHERE status = 'unreviewed'"
-    ).fetchone()[0]
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM _narration_training").fetchone()
+        total = row[0] if row else 0
+    except Exception:
+        conn.close()
+        return _default_stats
+    try:
+        _r = conn.execute("SELECT COUNT(*) FROM _narration_training WHERE status = 'verified'").fetchone()
+        verified = _r[0] if _r else 0
+        _r = conn.execute("SELECT COUNT(*) FROM _narration_training WHERE status = 'corrected'").fetchone()
+        corrected = _r[0] if _r else 0
+        _r = conn.execute("SELECT COUNT(*) FROM _narration_training WHERE status = 'skipped'").fetchone()
+        skipped = _r[0] if _r else 0
+        _r = conn.execute("SELECT COUNT(*) FROM _narration_training WHERE status = 'unreviewed'").fetchone()
+        unreviewed = _r[0] if _r else 0
+    except Exception:
+        conn.close()
+        return _default_stats
 
     reviewed = verified + corrected
     accuracy = (verified / reviewed * 100) if reviewed > 0 else 0.0
 
-    # Distinct categories in regex
-    regex_cats = conn.execute(
-        "SELECT COUNT(DISTINCT regex_category) FROM _narration_training"
-    ).fetchone()[0]
-
-    # Distinct categories in human labels
-    human_cats = conn.execute(
-        "SELECT COUNT(DISTINCT human_category) FROM _narration_training WHERE human_category IS NOT NULL AND human_category != ''"
-    ).fetchone()[0]
+    # Distinct categories
+    try:
+        _r = conn.execute("SELECT COUNT(DISTINCT regex_category) FROM _narration_training").fetchone()
+        regex_cats = _r[0] if _r else 0
+        _r = conn.execute(
+            "SELECT COUNT(DISTINCT human_category) FROM _narration_training WHERE human_category IS NOT NULL AND human_category != ''"
+        ).fetchone()
+        human_cats = _r[0] if _r else 0
+    except Exception:
+        regex_cats = 0
+        human_cats = 0
 
     conn.close()
     return {
@@ -446,18 +502,21 @@ def export_training_data(db_path: str, output_path: str, format: str = "jsonl") 
 
 def export_training_excel(db_path: str, output_path: str) -> int:
     """Export all narrations with classifications to Excel for bulk review.
-
-    Columns: GUID, Date, Voucher Type, Party, Amount, Narration,
-             Regex Category, Human Category, Status, Notes
-
+    DEFENSIVE: Handles empty data, missing table.
     Returns number of rows exported.
     """
     import pandas as pd
 
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        # Create empty Excel
+        pd.DataFrame().to_excel(output_path, index=False, sheet_name="Training Data")
+        return 0
     _ensure_table(conn)
 
-    df = pd.read_sql_query("""
+    try:
+        df = pd.read_sql_query("""
         SELECT guid AS GUID,
                date AS Date,
                voucher_type AS "Voucher Type",
@@ -471,7 +530,13 @@ def export_training_excel(db_path: str, output_path: str) -> int:
         FROM _narration_training
         ORDER BY amount DESC
     """, conn)
+    except Exception:
+        df = pd.DataFrame()
     conn.close()
+
+    if df.empty:
+        df.to_excel(output_path, index=False, sheet_name="Training Data")
+        return 0
 
     # Format date for display
     df["Date"] = df["Date"].apply(_format_date)

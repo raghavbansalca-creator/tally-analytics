@@ -6,11 +6,18 @@ in Excel format with professional formatting compliant with Companies Act, 2013.
 
 import sqlite3
 import os
+import logging
 from datetime import datetime
 from collections import OrderedDict
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill, numbers
 from openpyxl.utils import get_column_letter
+from defensive_helpers import (
+    table_exists, column_exists, get_table_columns,
+    safe_fetchone, safe_fetchall, safe_float, safe_divide
+)
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 
@@ -229,25 +236,41 @@ def _get_conn(db_path=None):
     return sqlite3.connect(db_path or DB_PATH)
 
 
+def _safe_column_query(conn, table, column, default=None):
+    """Check if column exists before querying."""
+    if not column_exists(conn, table, column):
+        return default
+    return True  # Column exists, safe to proceed
+
+
 def _get_all_groups_under(conn, root_groups):
-    """Recursively get all group names under root groups."""
+    """Recursively get all group names under root groups.
+    Works with ANY custom group hierarchy - walks the full parent chain."""
+    if not table_exists(conn, "mst_group"):
+        return set()
     all_groups = set()
     queue = list(root_groups)
     while queue:
         parent = queue.pop(0)
         all_groups.add(parent)
-        children = conn.execute(
-            "SELECT NAME FROM mst_group WHERE PARENT = ?", (parent,)
-        ).fetchall()
-        for (child,) in children:
-            if child not in all_groups:
-                queue.append(child)
+        try:
+            children = conn.execute(
+                "SELECT NAME FROM mst_group WHERE PARENT = ?", (parent,)
+            ).fetchall()
+            for (child,) in children:
+                if child not in all_groups:
+                    queue.append(child)
+        except Exception:
+            pass
     return all_groups
 
 
 def _get_ledger_balances(conn, group_names, exclude_groups=None, exclude_names=None):
-    """Get sum of closing balances for ledgers under given groups."""
+    """Get sum of closing balances for ledgers under given groups.
+    Safe for ANY company - handles missing groups gracefully."""
     if not group_names:
+        return 0.0
+    if not table_exists(conn, "mst_ledger") or not column_exists(conn, "mst_ledger", "CLOSINGBALANCE"):
         return 0.0
 
     all_groups = set()
@@ -367,29 +390,40 @@ def _get_direct_ledger_details(conn, group_names, exclude_names=None):
 
 
 def _get_metadata(conn):
-    """Fetch company metadata from _metadata table."""
+    """Fetch company metadata from _metadata table.
+    Safe: handles missing _metadata table."""
     try:
+        if not table_exists(conn, "_metadata"):
+            return {}
         rows = conn.execute("SELECT * FROM _metadata").fetchall()
-        return {r[0]: r[1] for r in rows}
+        return {r[0]: r[1] for r in rows} if rows else {}
     except Exception:
         return {}
 
 
 def _get_stock_ledger_balances(conn):
-    """Get opening and closing stock from Stock-in-Hand ledgers."""
-    rows = conn.execute("""
-        SELECT NAME, CAST(OPENINGBALANCE AS REAL) as ob,
-               CAST(CLOSINGBALANCE AS REAL) as cb
-        FROM mst_ledger WHERE PARENT IN (
-            SELECT NAME FROM mst_group
-            WHERE NAME = 'Stock-in-Hand'
-            UNION SELECT 'Stock-in-Hand'
-        )
-    """).fetchall()
-    opening = sum(abs(r[1]) for r in rows if r[1])
-    closing = sum(abs(r[2]) for r in rows if r[2])
-    details = [(r[0], abs(r[1]) if r[1] else 0, abs(r[2]) if r[2] else 0) for r in rows]
-    return opening, closing, details
+    """Get opening and closing stock from Stock-in-Hand ledgers.
+    Safe: handles service companies with no stock items."""
+    try:
+        if not table_exists(conn, "mst_ledger"):
+            return 0, 0, []
+        rows = conn.execute("""
+            SELECT NAME, CAST(OPENINGBALANCE AS REAL) as ob,
+                   CAST(CLOSINGBALANCE AS REAL) as cb
+            FROM mst_ledger WHERE PARENT IN (
+                SELECT NAME FROM mst_group
+                WHERE NAME = 'Stock-in-Hand'
+                UNION SELECT 'Stock-in-Hand'
+            )
+        """).fetchall()
+        if not rows:
+            return 0, 0, []
+        opening = sum(abs(r[1]) for r in rows if r[1])
+        closing = sum(abs(r[2]) for r in rows if r[2])
+        details = [(r[0], abs(r[1]) if r[1] else 0, abs(r[2]) if r[2] else 0) for r in rows]
+        return opening, closing, details
+    except Exception:
+        return 0, 0, []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -427,13 +461,17 @@ def _compute_item_amount(conn, config, side="liability"):
 
 
 def extract_balance_sheet_data(conn):
-    """Extract all Balance Sheet line items mapped to Schedule III."""
+    """Extract all Balance Sheet line items mapped to Schedule III.
+    Safe: handles companies with no fixed assets, no loans, custom groups, etc."""
 
     # Get deferred tax raw value (sum of ALL deferred tax ledgers)
-    dt_row = conn.execute(
-        "SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
-    ).fetchone()
-    dt_value = dt_row[0] if dt_row else 0.0
+    try:
+        dt_row = conn.execute(
+            "SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
+        ).fetchone()
+        dt_value = safe_float(dt_row[0]) if dt_row else 0.0
+    except Exception:
+        dt_value = 0.0
 
     # Extract liabilities
     liabilities = OrderedDict()
@@ -447,11 +485,14 @@ def extract_balance_sheet_data(conn):
             elif config.get("include_pl"):
                 # Reserves & Surplus + P&L balance
                 amt = _compute_item_amount(conn, config, side="liability")
-                pl_row = conn.execute(
-                    "SELECT CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
-                ).fetchone()
-                if pl_row and pl_row[0]:
-                    amt += pl_row[0]
+                try:
+                    pl_row = conn.execute(
+                        "SELECT CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
+                    ).fetchone()
+                    if pl_row and pl_row[0]:
+                        amt += safe_float(pl_row[0])
+                except Exception:
+                    pass
             elif config.get("exclude_groups"):
                 # Share Capital excluding Reserves & Surplus sub-groups
                 all_grps = set()
@@ -502,19 +543,78 @@ def extract_balance_sheet_data(conn):
         assets[section_key] = section_data
 
     # Handle Suspense A/c
-    suspense_raw = _get_ledger_balances(conn, ["Suspense A/c"])
-    if suspense_raw != 0:
-        if suspense_raw < 0:  # debit = asset
-            assets["current_assets"]["other_current_assets"]["amount"] += abs(suspense_raw)
-        else:  # credit = liability
-            liabilities["current_liabilities"]["other_current_liabilities"]["amount"] += suspense_raw
+    try:
+        suspense_raw = _get_ledger_balances(conn, ["Suspense A/c"])
+        if suspense_raw != 0:
+            if suspense_raw < 0:  # debit = asset
+                assets["current_assets"]["other_current_assets"]["amount"] += abs(suspense_raw)
+            else:  # credit = liability
+                liabilities["current_liabilities"]["other_current_liabilities"]["amount"] += suspense_raw
+    except Exception:
+        pass
 
     total_liabilities = sum(
-        item["amount"] for section in liabilities.values() for item in section.values()
+        safe_float(item.get("amount", 0)) for section in liabilities.values() for item in section.values()
     )
     total_assets = sum(
-        item["amount"] for section in assets.values() for item in section.values()
+        safe_float(item.get("amount", 0)) for section in assets.values() for item in section.values()
     )
+
+    # BALANCE SHEET VERIFICATION: log unclassified ledgers if it doesn't balance
+    diff = abs(total_liabilities - total_assets)
+    if diff >= 1.0:
+        try:
+            # Find all ledgers and check if any are unclassified
+            all_groups_used = set()
+            for section_key, items in SCHEDULE_III_LIABILITIES.items():
+                for item_key, config in items.items():
+                    for g in config.get("groups", []):
+                        all_groups_used |= _get_all_groups_under(conn, [g])
+                    for g in config.get("_direct_groups", []):
+                        all_groups_used.add(g)
+            for section_key, items in SCHEDULE_III_ASSETS.items():
+                for item_key, config in items.items():
+                    for g in config.get("groups", []):
+                        all_groups_used |= _get_all_groups_under(conn, [g])
+                    for g in config.get("_direct_groups", []):
+                        all_groups_used.add(g)
+
+            # Find ledgers NOT in any classified group
+            all_ledger_rows = conn.execute(
+                "SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE CLOSINGBALANCE IS NOT NULL"
+            ).fetchall()
+            unclassified = []
+            unclassified_total = 0.0
+            for row in all_ledger_rows:
+                if row[1] not in all_groups_used and row[2] and abs(safe_float(row[2])) > 0.01:
+                    # Check if it's a P&L group (revenue/expense) - those don't go to BS
+                    is_pl = False
+                    for pl_key, pl_config in SCHEDULE_III_PL.items():
+                        pl_groups = set()
+                        for g in pl_config.get("groups", []):
+                            pl_groups |= _get_all_groups_under(conn, [g])
+                        if row[1] in pl_groups:
+                            is_pl = True
+                            break
+                    for exp_key, exp_config in SCHEDULE_III_EXPENSES.items():
+                        exp_groups = set()
+                        for g in exp_config.get("groups", []):
+                            exp_groups |= _get_all_groups_under(conn, [g])
+                        if row[1] in exp_groups:
+                            is_pl = True
+                            break
+                    if not is_pl:
+                        unclassified.append((row[0], row[1], safe_float(row[2])))
+                        unclassified_total += safe_float(row[2])
+
+            if unclassified:
+                logger.warning(
+                    f"BS difference: {diff:.2f}. Unclassified BS ledgers ({len(unclassified)}), "
+                    f"total: {unclassified_total:.2f}: "
+                    f"{[(l[0], l[1], l[2]) for l in unclassified[:10]]}"
+                )
+        except Exception as e:
+            logger.warning(f"BS verification failed: {e}")
 
     return {
         "liabilities": liabilities,
@@ -567,24 +667,33 @@ def extract_pl_data(conn):
     total_expenses = sum(item["amount"] for item in expenses.values())
     profit_before_tax = total_income - total_expenses
 
-    # Tax
-    dt_row = conn.execute(
-        "SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
-    ).fetchone()
-    dt_value = dt_row[0] if dt_row else 0.0
+    # Tax - safe access
+    try:
+        dt_row = conn.execute(
+            "SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
+        ).fetchone()
+        dt_value = safe_float(dt_row[0]) if dt_row else 0.0
+    except Exception:
+        dt_value = 0.0
 
     # For deferred tax in P&L: change in DT during the year
-    dt_ob_row = conn.execute(
-        "SELECT COALESCE(SUM(CAST(OPENINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
-    ).fetchone()
-    dt_ob = dt_ob_row[0] if dt_ob_row else 0.0
+    try:
+        dt_ob_row = conn.execute(
+            "SELECT COALESCE(SUM(CAST(OPENINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
+        ).fetchone()
+        dt_ob = safe_float(dt_ob_row[0]) if dt_ob_row else 0.0
+    except Exception:
+        dt_ob = 0.0
     dt_change = dt_value - dt_ob  # positive = increase in liability = tax expense
 
     # Current tax from Provision for Corporate Tax or similar
-    ct_row = conn.execute(
-        "SELECT CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE '%provision for%tax%'"
-    ).fetchone()
-    current_tax = abs(ct_row[0]) if ct_row and ct_row[0] else 0.0
+    try:
+        ct_row = conn.execute(
+            "SELECT CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE '%provision for%tax%'"
+        ).fetchone()
+        current_tax = abs(safe_float(ct_row[0])) if ct_row and ct_row[0] else 0.0
+    except Exception:
+        current_tax = 0.0
 
     profit_after_tax = profit_before_tax - current_tax - dt_change
 
@@ -626,11 +735,15 @@ def extract_notes_data(conn, bs_data, pl_data):
 
     # Note 3: Reserves and Surplus
     rs_ledgers = _get_ledger_details(conn, ["Reserves & Surplus"])
-    pl_row = conn.execute(
-        "SELECT CAST(OPENINGBALANCE AS REAL), CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
-    ).fetchone()
-    pl_ob = pl_row[0] if pl_row and pl_row[0] else 0.0
-    pl_cb = pl_row[1] if pl_row and pl_row[1] else 0.0
+    try:
+        pl_row = conn.execute(
+            "SELECT CAST(OPENINGBALANCE AS REAL), CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
+        ).fetchone()
+        pl_ob = safe_float(pl_row[0]) if pl_row else 0.0
+        pl_cb = safe_float(pl_row[1]) if pl_row else 0.0
+    except Exception:
+        pl_ob = 0.0
+        pl_cb = 0.0
 
     notes["3"] = {
         "title": "Reserves and Surplus",
@@ -1780,8 +1893,12 @@ def _build_notes_sheets(wb, notes_data, company_info):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def generate_schedule_iii(db_path=None, company_info=None, output_path=None):
-    """Generate complete Schedule III financial statements in Excel."""
-    conn = _get_conn(db_path)
+    """Generate complete Schedule III financial statements in Excel.
+    Safe: handles any company's data without crashing."""
+    try:
+        conn = _get_conn(db_path)
+    except Exception as e:
+        raise RuntimeError(f"Cannot connect to database: {e}")
     metadata = _get_metadata(conn)
 
     if not company_info:
@@ -1833,16 +1950,46 @@ def generate_schedule_iii(db_path=None, company_info=None, output_path=None):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def get_bs_preview_data(db_path=None):
-    """Get Balance Sheet data for Streamlit preview."""
-    conn = _get_conn(db_path)
-    data = extract_balance_sheet_data(conn)
-    conn.close()
-    return data
+    """Get Balance Sheet data for Streamlit preview.
+    Safe: returns zeroed data on any error."""
+    try:
+        conn = _get_conn(db_path)
+        data = extract_balance_sheet_data(conn)
+        conn.close()
+        return data
+    except Exception as e:
+        logger.error(f"Failed to get BS preview data: {e}")
+        # Return minimal valid structure
+        empty_section = OrderedDict()
+        return {
+            "liabilities": OrderedDict([
+                ("shareholders_funds", empty_section),
+                ("share_application", empty_section),
+                ("non_current_liabilities", empty_section),
+                ("current_liabilities", empty_section),
+            ]),
+            "assets": OrderedDict([
+                ("non_current_assets", empty_section),
+                ("current_assets", empty_section),
+            ]),
+            "total_liabilities": 0.0,
+            "total_assets": 0.0,
+        }
 
 
 def get_pl_preview_data(db_path=None):
-    """Get P&L data for Streamlit preview."""
-    conn = _get_conn(db_path)
-    data = extract_pl_data(conn)
-    conn.close()
-    return data
+    """Get P&L data for Streamlit preview.
+    Safe: returns zeroed data on any error."""
+    try:
+        conn = _get_conn(db_path)
+        data = extract_pl_data(conn)
+        conn.close()
+        return data
+    except Exception as e:
+        logger.error(f"Failed to get PL preview data: {e}")
+        return {
+            "revenue": 0.0, "other_income": 0.0, "total_income": 0.0,
+            "expenses": OrderedDict(), "total_expenses": 0.0,
+            "profit_before_tax": 0.0, "tax_current": 0.0,
+            "tax_deferred": 0.0, "profit_after_tax": 0.0,
+        }

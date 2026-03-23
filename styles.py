@@ -9,8 +9,14 @@ import streamlit as st
 # -- FORMATTERS ---------------------------------------------------------------
 
 def fmt(amount):
-    """Format amount in Indian numbering: Cr / L / thousands."""
+    """Format amount in Indian numbering: Cr / L / thousands.
+    DEFENSIVE: Handles None, non-numeric, zero safely.
+    """
     if amount is None:
+        return "0"
+    try:
+        amount = float(amount)
+    except (ValueError, TypeError):
         return "0"
     abs_amt = abs(amount)
     sign = "-" if amount < 0 else ""
@@ -25,8 +31,14 @@ def fmt(amount):
 
 
 def fmt_full(amount):
-    """Full formatted amount with decimals."""
+    """Full formatted amount with decimals.
+    DEFENSIVE: Handles None, non-numeric safely.
+    """
     if amount is None:
+        return "0.00"
+    try:
+        amount = float(amount)
+    except (ValueError, TypeError):
         return "0.00"
     sign = "-" if amount < 0 else ""
     return f"{sign}{abs(amount):,.2f}"

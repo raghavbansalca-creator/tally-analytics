@@ -21,7 +21,12 @@ from styles import (
 st.set_page_config(page_title="Narration Cross-Check", page_icon="", layout="wide")
 inject_base_styles()
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tally_data.db")
+DB_PATH = st.session_state.get("db_path", "") or os.path.join(os.path.dirname(os.path.dirname(__file__)), "tally_data.db")
+
+if not os.path.exists(DB_PATH):
+    page_header("Narration Cross-Check", "No database loaded")
+    st.warning("No Tally database found. Please load a database from the Setup page.")
+    st.stop()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -81,8 +86,15 @@ def severity_badge(severity):
 try:
     import sqlite3
     _conn = sqlite3.connect(DB_PATH)
-    _row = _conn.execute("SELECT value FROM _metadata WHERE key='company_name'").fetchone()
-    COMPANY = _row[0] if _row else "Company"
+    # Check _metadata table exists before querying
+    _tbl_check = _conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_metadata'"
+    ).fetchone()
+    if _tbl_check and _tbl_check[0] > 0:
+        _row = _conn.execute("SELECT value FROM _metadata WHERE key='company_name'").fetchone()
+        COMPANY = _row[0] if _row else "Company"
+    else:
+        COMPANY = "Company"
     _conn.close()
 except Exception:
     COMPANY = "Company"
