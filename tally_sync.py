@@ -28,9 +28,30 @@ def _sanitize_xml(data):
     """Remove illegal XML characters that Tally sometimes emits."""
     if isinstance(data, bytes):
         data = data.decode("utf-8", errors="replace")
+    # Remove control character references (&#0; through &#31; except &#9;&#10;&#13;)
     data = re.sub(r'&#(?:0*[0-8]|0*1[0-1]|0*1[4-9]|0*2[0-9]|0*3[0-1]);', '', data)
+    # Remove ALL numeric char refs that are control chars
+    data = re.sub(r'&#\d+;', lambda m: m.group() if int(m.group()[2:-1]) > 31 else '', data)
+    # Remove raw control chars
     data = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', data)
-    return data
+    # Fix unescaped ampersands
+    data = re.sub(r'&(?!amp;|lt;|gt;|apos;|quot;|#)', '&amp;', data)
+    # Remove UDF namespace tags (Tally custom fields with UDF: prefix)
+    lines = data.split('\n')
+    clean_lines = []
+    skip_udf = False
+    for line in lines:
+        stripped = line.strip()
+        if '<UDF:' in stripped:
+            if '.LIST' in stripped and '/>' not in stripped:
+                skip_udf = True
+            continue
+        if skip_udf:
+            if '</UDF:' in stripped:
+                skip_udf = False
+            continue
+        clean_lines.append(line)
+    return '\n'.join(clean_lines)
 
 
 def _post_xml(url, xml_body, timeout=120):
