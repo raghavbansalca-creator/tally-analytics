@@ -164,7 +164,7 @@ def parse_bank_narration(narration):
                    party_extracted, reference, raw_narration
         Returns None if narration doesn't match any bank pattern.
     """
-    if not narration or len(narration.strip()) < 5:
+    if not narration or not isinstance(narration, str) or len(narration.strip()) < 5:
         return None
 
     text = narration.strip()

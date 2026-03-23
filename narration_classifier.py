@@ -78,6 +78,12 @@ def classify_voucher(
             needs_review: bool
             suggested_correct_group: If narration contradicts group, what group SHOULD it be?
     """
+    # Sanitize inputs
+    narration = narration if isinstance(narration, str) else str(narration or "")
+    voucher_type = voucher_type if isinstance(voucher_type, str) else str(voucher_type or "")
+    party_name = party_name if isinstance(party_name, str) else str(party_name or "")
+    amount = amount if isinstance(amount, (int, float)) else 0
+
     result = {
         "category": "Uncategorized",
         "group_says": None,
@@ -92,8 +98,10 @@ def classify_voucher(
         "suggested_correct_group": None,
     }
 
-    debit_groups = set(l["group"] for l in legs if l.get("is_debit"))
-    credit_groups = set(l["group"] for l in legs if not l.get("is_debit"))
+    if not legs or not isinstance(legs, (list, tuple)):
+        legs = []
+    debit_groups = set(l.get("group", "") for l in legs if isinstance(l, dict) and l.get("is_debit"))
+    credit_groups = set(l.get("group", "") for l in legs if isinstance(l, dict) and not l.get("is_debit"))
     all_groups = debit_groups | credit_groups
 
     # ════════════════════════════════════════════════════════════════════

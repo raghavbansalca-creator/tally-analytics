@@ -1047,7 +1047,10 @@ def gstr3b_summary(conn, month=None):
         cn_sgst = 0.0
         cn_igst = 0.0
 
-        rows = conn.execute("SELECT name, CLOSINGBALANCE FROM mst_ledger").fetchall()
+        try:
+            rows = conn.execute("SELECT name, CLOSINGBALANCE FROM mst_ledger").fetchall()
+        except Exception:
+            rows = []
         for name, cb in rows:
             bal = _safe_float(cb)
             if bal == 0:

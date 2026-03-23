@@ -820,7 +820,13 @@ def _save_profile(conn, profile):
 def load_profile(db_path="tally_data.db"):
     """Load a previously saved profile from the database."""
     import json
-    conn = sqlite3.connect(db_path)
+    import os
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return None
     cur = conn.cursor()
     try:
         cur.execute("SELECT key, value FROM _company_profile")
