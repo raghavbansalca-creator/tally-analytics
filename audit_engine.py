@@ -16,6 +16,7 @@ from defensive_helpers import (
     table_exists, column_exists, get_table_columns,
     safe_float, safe_divide
 )
+from tally_reports import get_groups_by_nature
 
 
 def run_all_checks(db_path="tally_data.db"):
@@ -389,7 +390,9 @@ def check_cash_limit(conn):
     cur = conn.cursor()
     try:
         # Find cash ledger
-        cur.execute("SELECT NAME FROM mst_ledger WHERE UPPER(PARENT) = 'CASH-IN-HAND'")
+        _cash_groups = get_groups_by_nature(conn, 'cash')
+        _cash_ph = ",".join(["?"] * len(_cash_groups)) if _cash_groups else "'__NONE__'"
+        cur.execute(f"SELECT NAME FROM mst_ledger WHERE PARENT IN ({_cash_ph})", _cash_groups)
         cash_ledgers = [row[0] for row in cur.fetchall()]
 
         if not cash_ledgers:
@@ -515,8 +518,10 @@ def check_negative_cash(conn):
     """Detect dates where cash balance goes negative — indicates unrecorded receipts."""
     cur = conn.cursor()
     try:
-        # Get cash opening balance
-        cur.execute("SELECT NAME, OPENINGBALANCE FROM mst_ledger WHERE UPPER(PARENT) = 'CASH-IN-HAND'")
+        # Get cash opening balance (recursive sub-groups)
+        _cash_groups2 = get_groups_by_nature(conn, 'cash')
+        _cash_ph2 = ",".join(["?"] * len(_cash_groups2)) if _cash_groups2 else "'__NONE__'"
+        cur.execute(f"SELECT NAME, OPENINGBALANCE FROM mst_ledger WHERE PARENT IN ({_cash_ph2})", _cash_groups2)
         cash_ledgers = []
         for row in cur.fetchall():
             try:
@@ -587,13 +592,15 @@ def check_debit_balance_creditors(conn):
     """Creditors with debit balance = overpayment, mapping error, or misappropriation."""
     cur = conn.cursor()
     try:
-        cur.execute("""
+        _cr_groups = get_groups_by_nature(conn, 'creditors')
+        _cr_ph = ",".join(["?"] * len(_cr_groups)) if _cr_groups else "'__NONE__'"
+        cur.execute(f"""
             SELECT NAME, CLOSINGBALANCE FROM mst_ledger
-            WHERE UPPER(PARENT) = 'SUNDRY CREDITORS'
+            WHERE PARENT IN ({_cr_ph})
             AND CLOSINGBALANCE IS NOT NULL AND CLOSINGBALANCE != ''
             AND CAST(CLOSINGBALANCE AS REAL) > 0
             ORDER BY CAST(CLOSINGBALANCE AS REAL) DESC
-        """)
+        """, _cr_groups)
         # In Tally, creditors normally have negative (credit) balance
         # Positive = debit balance = unusual
         flagged = []
@@ -629,13 +636,15 @@ def check_credit_balance_debtors(conn):
     """Debtors with credit balance = advance received not adjusted, or fictitious debtors."""
     cur = conn.cursor()
     try:
-        cur.execute("""
+        _dr_groups = get_groups_by_nature(conn, 'debtors')
+        _dr_ph = ",".join(["?"] * len(_dr_groups)) if _dr_groups else "'__NONE__'"
+        cur.execute(f"""
             SELECT NAME, CLOSINGBALANCE FROM mst_ledger
-            WHERE UPPER(PARENT) = 'SUNDRY DEBTORS'
+            WHERE PARENT IN ({_dr_ph})
             AND CLOSINGBALANCE IS NOT NULL AND CLOSINGBALANCE != ''
             AND CAST(CLOSINGBALANCE AS REAL) < 0
             ORDER BY CAST(CLOSINGBALANCE AS REAL) ASC
-        """)
+        """, _dr_groups)
         # In Tally, debtors normally have positive (debit) balance
         # Negative = credit balance = unusual
         flagged = []

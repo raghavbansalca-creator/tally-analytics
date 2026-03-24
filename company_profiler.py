@@ -13,6 +13,7 @@ from defensive_helpers import (
     table_exists, column_exists, get_table_columns,
     safe_fetchone, safe_fetchall, safe_float, safe_divide
 )
+from tally_reports import get_groups_by_nature
 
 
 def profile_company(db_path="tally_data.db"):
@@ -157,15 +158,17 @@ def _detect_entity_type(cur, profile):
             signals["pan_entity"] = pan_map[pan_4th]
             scores[pan_map[pan_4th]] += 10  # Strong signal
 
-    # Signal 2: Capital Account ledger patterns
+    # Signal 2: Capital Account ledger patterns (recursive sub-groups)
     try:
-        cur.execute("""
+        _cap_groups = get_groups_by_nature(conn, 'capital')
+        _cap_ph = ",".join(["?"] * len(_cap_groups)) if _cap_groups else "'__NONE__'"
+        cur.execute(f"""
             SELECT NAME, PARENT FROM mst_ledger
-            WHERE UPPER(PARENT) IN ('CAPITAL ACCOUNT', 'CAPITAL ACCOUNTS')
+            WHERE PARENT IN ({_cap_ph})
             OR UPPER(NAME) LIKE '%CAPITAL%'
             OR UPPER(NAME) LIKE '%DRAWING%'
             OR UPPER(NAME) LIKE '%SHARE CAPITAL%'
-        """)
+        """, _cap_groups)
         capital_ledgers = [dict(row) for row in cur.fetchall()]
         signals["capital_ledgers"] = [l["NAME"] for l in capital_ledgers]
 
@@ -333,24 +336,29 @@ def _detect_business_nature(cur, profile):
 
     # Signal 4: Income/Expense ledger analysis
     try:
-        # Service income indicators
-        cur.execute("""
+        # Service income indicators (flag-based)
+        _inc_groups = get_groups_by_nature(conn, 'income')
+        _inc_ph = ",".join(["?"] * len(_inc_groups)) if _inc_groups else "'__NONE__'"
+        cur.execute(f"""
             SELECT NAME FROM mst_ledger
-            WHERE UPPER(PARENT) IN ('DIRECT INCOMES', 'DIRECT INCOME', 'INDIRECT INCOMES', 'INDIRECT INCOME')
+            WHERE PARENT IN ({_inc_ph})
             AND (UPPER(NAME) LIKE '%PROFESSIONAL%' OR UPPER(NAME) LIKE '%CONSULTING%'
                  OR UPPER(NAME) LIKE '%SERVICE%' OR UPPER(NAME) LIKE '%COMMISSION%'
                  OR UPPER(NAME) LIKE '%BROKERAGE%' OR UPPER(NAME) LIKE '%FEES%')
-        """)
+        """, _inc_groups)
         service_income = [row[0] for row in cur.fetchall()]
         if service_income:
             scores["Service"] += len(service_income) * 3
             signals["service_income_ledgers"] = service_income
 
-        # Trading indicators — Sales/Purchase accounts
-        cur.execute("""
+        # Trading indicators — Sales/Purchase accounts (flag-based)
+        _trade_groups = get_groups_by_nature(conn, 'sales') + get_groups_by_nature(conn, 'purchase')
+        _trade_groups = list(dict.fromkeys(_trade_groups))
+        _trade_ph = ",".join(["?"] * len(_trade_groups)) if _trade_groups else "'__NONE__'"
+        cur.execute(f"""
             SELECT COUNT(*) FROM mst_ledger
-            WHERE UPPER(PARENT) IN ('SALES ACCOUNTS', 'PURCHASE ACCOUNTS')
-        """)
+            WHERE PARENT IN ({_trade_ph})
+        """, _trade_groups)
         trade_ledger_count = cur.fetchone()[0]
         if trade_ledger_count > 0:
             scores["Trading"] += 3
@@ -691,9 +699,11 @@ def _detect_complexity(cur, profile):
     except Exception:
         pass
 
-    # Bank accounts
+    # Bank accounts (flag-based)
     try:
-        cur.execute("SELECT COUNT(*) FROM mst_ledger WHERE UPPER(PARENT) = 'BANK ACCOUNTS'")
+        _bank_groups = get_groups_by_nature(conn, 'bank')
+        _bank_ph = ",".join(["?"] * len(_bank_groups)) if _bank_groups else "'__NONE__'"
+        cur.execute(f"SELECT COUNT(*) FROM mst_ledger WHERE PARENT IN ({_bank_ph})", _bank_groups)
         banks = cur.fetchone()[0]
         if banks > 3:
             score += 1

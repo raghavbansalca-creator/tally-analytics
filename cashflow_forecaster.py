@@ -241,7 +241,7 @@ def _analyze_historical_impl(conn, months_back):
     payment_by_month = {r[0]: r[1] for r in payment_rows}
 
     # ---- Sales receipts (from Sales Accounts ledgers, recursive) ----
-    _s_ph, _s_g = _group_ph_cf(conn, ["Sales Accounts"])
+    _s_ph, _s_g = _nature_ph_cf(conn, 'sales')
     sales_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
@@ -254,7 +254,7 @@ def _analyze_historical_impl(conn, months_back):
     sales_by_month = {r[0]: r[1] for r in sales_rows}
 
     # ---- Purchase payments (recursive) ----
-    _p_ph, _p_g = _group_ph_cf(conn, ["Purchase Accounts"])
+    _p_ph, _p_g = _nature_ph_cf(conn, 'purchase')
     purchase_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
@@ -284,7 +284,7 @@ def _analyze_historical_impl(conn, months_back):
         pass
 
     # ---- GST payments (Duties & Taxes ledgers with GST/CGST/SGST/IGST, recursive) ----
-    _dt_ph, _dt_g = _group_ph_cf(conn, ["Duties & Taxes"])
+    _dt_ph, _dt_g = _nature_ph_cf(conn, 'duties_taxes')
     gst_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
@@ -333,7 +333,7 @@ def _analyze_historical_impl(conn, months_back):
     # ---- Loan payments (EMI detection, group may not exist, recursive) ----
     loan_by_month = {}
     try:
-        _ln_ph, _ln_g = _group_ph_cf(conn, ["Secured Loans", "Unsecured Loans", "Loans (Liability)"])
+        _ln_ph, _ln_g = _nature_ph_cf(conn, 'loans')
         loan_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
@@ -418,7 +418,7 @@ def _analyze_historical_impl(conn, months_back):
     total_payables = 0
     if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
         try:
-            _dr_ph, _dr_g = _group_ph_cf(conn, ["Sundry Debtors"])
+            _dr_ph, _dr_g = _nature_ph_cf(conn, 'debtors')
             debtor_row = conn.execute(f"""
                 SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({_dr_ph})
@@ -428,7 +428,7 @@ def _analyze_historical_impl(conn, months_back):
             pass
 
         try:
-            _cr_ph, _cr_g = _group_ph_cf(conn, ["Sundry Creditors"])
+            _cr_ph, _cr_g = _nature_ph_cf(conn, 'creditors')
             creditor_row = conn.execute(f"""
                 SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({_cr_ph})
@@ -461,7 +461,9 @@ def _analyze_historical_impl(conn, months_back):
     cash_balance = 0
     if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
         try:
-            _bk_ph, _bk_g = _group_ph_cf(conn, ["Bank Accounts", "Bank OD A/c"])
+            _bk_all = get_groups_by_nature(conn, 'bank') + get_groups_by_nature(conn, 'bank_od')
+            _bk_g = list(dict.fromkeys(_bk_all))
+            _bk_ph = ",".join(["?"] * len(_bk_g)) if _bk_g else "'__NONE__'"
             bank_rows = conn.execute(f"""
                 SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL)
                 FROM mst_ledger
@@ -473,7 +475,7 @@ def _analyze_historical_impl(conn, months_back):
             pass
 
         try:
-            _ci_ph, _ci_g = _group_ph_cf(conn, ["Cash-in-Hand"])
+            _ci_ph, _ci_g = _nature_ph_cf(conn, 'cash')
             cash_rows = conn.execute(f"""
                 SELECT CAST(CLOSINGBALANCE AS REAL)
                 FROM mst_ledger WHERE PARENT IN ({_ci_ph})
