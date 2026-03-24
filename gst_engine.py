@@ -538,7 +538,7 @@ def gstr1_hsn_summary(conn, month=None):
 
     try:
         rows = conn.execute(f"""
-            SELECT a.GSTHSNNAME, a.LEDGERNAME, SUM(ABS(CAST(a.AMOUNT AS REAL))) as total
+            SELECT a.GSTHSNNAME, a.LEDGERNAME, ABS(SUM(CAST(a.AMOUNT AS REAL))) as total
             FROM trn_accounting a
             JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
             WHERE a.VOUCHER_GUID IN (
