@@ -413,14 +413,15 @@ def _analyze_historical_impl(conn, months_back):
     total_sales = sum(sales_by_month.get(ym, 0) or 0 for ym in all_months)
     total_purchases = sum(purchase_by_month.get(ym, 0) or 0 for ym in all_months)
 
-    # Receivables and payables (CLOSINGBALANCE may not exist)
+    # Receivables and payables (CLOSINGBALANCE/COMPUTED_CB may not exist)
     total_receivables = 0
     total_payables = 0
-    if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
+    _bc_cf = "COMPUTED_CB" if _has_column_cf(conn, "mst_ledger", "COMPUTED_CB") else "CLOSINGBALANCE"
+    if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", _bc_cf):
         try:
             _dr_ph, _dr_g = _nature_ph_cf(conn, 'debtors')
             debtor_row = conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
+                SELECT COALESCE(SUM(ABS(CAST({_bc_cf} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({_dr_ph})
             """, _dr_g).fetchone()
             total_receivables = (debtor_row[0] if debtor_row else 0) or 0
@@ -430,7 +431,7 @@ def _analyze_historical_impl(conn, months_back):
         try:
             _cr_ph, _cr_g = _nature_ph_cf(conn, 'creditors')
             creditor_row = conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
+                SELECT COALESCE(SUM(ABS(CAST({_bc_cf} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({_cr_ph})
             """, _cr_g).fetchone()
             total_payables = (creditor_row[0] if creditor_row else 0) or 0
@@ -456,16 +457,16 @@ def _analyze_historical_impl(conn, months_back):
         "working_capital_cycle": round(dso - dpo, 1),
     }
 
-    # ---- Current position (CLOSINGBALANCE may not exist) ----
+    # ---- Current position (CLOSINGBALANCE/COMPUTED_CB may not exist) ----
     bank_balance = 0
     cash_balance = 0
-    if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
+    if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", _bc_cf):
         try:
             _bk_all = get_groups_by_nature(conn, 'bank') + get_groups_by_nature(conn, 'bank_od')
             _bk_g = list(dict.fromkeys(_bk_all))
             _bk_ph = ",".join(["?"] * len(_bk_g)) if _bk_g else "'__NONE__'"
             bank_rows = conn.execute(f"""
-                SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL)
+                SELECT NAME, PARENT, CAST({_bc_cf} AS REAL)
                 FROM mst_ledger
                 WHERE PARENT IN ({_bk_ph})
             """, _bk_g).fetchall() or []
@@ -477,7 +478,7 @@ def _analyze_historical_impl(conn, months_back):
         try:
             _ci_ph, _ci_g = _nature_ph_cf(conn, 'cash')
             cash_rows = conn.execute(f"""
-                SELECT CAST(CLOSINGBALANCE AS REAL)
+                SELECT CAST({_bc_cf} AS REAL)
                 FROM mst_ledger WHERE PARENT IN ({_ci_ph})
             """, _ci_g).fetchall() or []
             # Cash debit balance is negative in Tally

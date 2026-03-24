@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from tally_reports import (
     get_conn, profit_and_loss, balance_sheet, ledger_detail,
     pl_group_drilldown, debtor_aging, creditor_aging,
-    get_all_groups_under, search_ledger,
+    get_all_groups_under, search_ledger, _bal_col,
     BS_ASSET_ROOTS, BS_LIABILITY_ROOTS,
     PL_INCOME_ROOTS, PL_EXPENSE_ROOTS,
     voucher_summary, stock_summary, godown_summary,
@@ -417,18 +417,20 @@ def show_group():
     st.markdown(f'<div class="company-name">Ledger-wise breakup</div>', unsafe_allow_html=True)
 
     try:
+        bc = _bal_col(conn)
         all_sub_groups = list(get_all_groups_under(conn, [group_name]))
         _ph = ",".join(["?"] * len(all_sub_groups))
         rows = conn.execute(f"""
-            SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
+            SELECT NAME, CAST({bc} AS REAL) as balance
             FROM mst_ledger WHERE PARENT IN ({_ph})
-            ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
+            ORDER BY ABS(CAST({bc} AS REAL)) DESC
         """, all_sub_groups).fetchall()
     except Exception as e:
         st.error(f"Could not load group: {e}"); return
 
     if not rows:
         try:
+            bc = _bal_col(conn)
             all_groups = get_all_groups_under(conn, [group_name])
             all_groups.discard(group_name)
             if all_groups:
@@ -436,7 +438,7 @@ def show_group():
                 for sg in sorted(all_groups):
                     _sg_subs = list(get_all_groups_under(conn, [sg]))
                     _sg_ph = ",".join(["?"] * len(_sg_subs))
-                    sg_row = conn.execute(f"SELECT SUM(ABS(CAST(CLOSINGBALANCE AS REAL))) FROM mst_ledger WHERE PARENT IN ({_sg_ph})", _sg_subs).fetchone()
+                    sg_row = conn.execute(f"SELECT SUM(ABS(CAST({bc} AS REAL))) FROM mst_ledger WHERE PARENT IN ({_sg_ph})", _sg_subs).fetchone()
                     sg_total = (sg_row[0] if sg_row else 0) or 0
                     if sg_total > 0:
                         if st.button(f"> {sg}   --   {fmt(sg_total)}", key=f"sg_{sg}"):
@@ -463,7 +465,8 @@ def show_ledger():
     st.markdown(f'<div class="report-title">{ledger_name}</div>', unsafe_allow_html=True)
 
     try:
-        info = conn.execute("SELECT PARENT, CAST(OPENINGBALANCE AS REAL), CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = ?", (ledger_name,)).fetchone()
+        bc = _bal_col(conn)
+        info = conn.execute(f"SELECT PARENT, CAST(OPENINGBALANCE AS REAL), CAST({bc} AS REAL) FROM mst_ledger WHERE NAME = ?", (ledger_name,)).fetchone()
     except Exception:
         info = None
 

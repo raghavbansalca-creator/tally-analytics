@@ -47,6 +47,12 @@ def _safe_fetchone_val(cur, default=0):
     return row[0]
 
 
+def _bal_col(conn):
+    """Return the best balance column: COMPUTED_CB if available, else CLOSINGBALANCE."""
+    cols = _get_cols(conn, "mst_ledger")
+    return "COMPUTED_CB" if "COMPUTED_CB" in cols else "CLOSINGBALANCE"
+
+
 def _get_all_groups_under(conn, root_groups):
     """Recursively get all group names under any of the root groups (inclusive).
     E.g., _get_all_groups_under(conn, ['Sales Accounts']) returns
@@ -487,7 +493,7 @@ def bank_balances(conn, date_from=None, date_to=None):
     """All bank account balances."""
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
-    has_cb = "CLOSINGBALANCE" in lcols
+    has_cb = "COMPUTED_CB" in lcols or "CLOSINGBALANCE" in lcols
 
     _bank_all = get_groups_by_nature(conn, 'bank') + get_groups_by_nature(conn, 'bank_od') + get_groups_by_nature(conn, 'cash')
     bank_groups = list(dict.fromkeys(_bank_all))
@@ -522,14 +528,15 @@ def bank_balances(conn, date_from=None, date_to=None):
             return []
 
     if has_cb:
+        bc = _bal_col(conn)
         try:
             return conn.execute(f"""
                 SELECT NAME, PARENT,
                        CAST(OPENINGBALANCE AS REAL) as opening,
-                       CAST(CLOSINGBALANCE AS REAL) as closing
+                       CAST({bc} AS REAL) as closing
                 FROM mst_ledger
                 WHERE PARENT IN ({bank_ph})
-                ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
+                ORDER BY ABS(CAST({bc} AS REAL)) DESC
             """, bank_groups).fetchall()
         except sqlite3.OperationalError:
             return []
@@ -797,7 +804,7 @@ def project_cash_flow(conn, months_ahead=3, date_from=None, date_to=None):
 def working_capital_analysis(conn, date_from=None, date_to=None):
     """Current assets vs current liabilities."""
     lcols = _get_cols(conn, "mst_ledger")
-    has_cb = "CLOSINGBALANCE" in lcols
+    has_cb = "COMPUTED_CB" in lcols or "CLOSINGBALANCE" in lcols or "COMPUTED_CB" in lcols
 
     ca_groups = ['Sundry Debtors', 'Cash-in-Hand', 'Bank Accounts', 'Bank OD A/c',
                  'Stock-in-Hand', 'Deposits (Asset)', 'Loans & Advances (Asset)']
@@ -810,9 +817,10 @@ def working_capital_analysis(conn, date_from=None, date_to=None):
             return 0
         ph = ",".join(["?"] * len(all_groups))
         if has_cb:
+            bc = _bal_col(conn)
             try:
                 row = conn.execute(f"""
-                    SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
+                    SELECT COALESCE(SUM(ABS(CAST({bc} AS REAL))), 0)
                     FROM mst_ledger WHERE PARENT IN ({ph})
                 """, list(all_groups)).fetchone()
                 return (row[0] or 0) if row else 0
@@ -886,16 +894,17 @@ def key_ratios(conn, date_from=None, date_to=None):
 
     # Debtor/creditor balances (recursive sub-groups)
     lcols = _get_cols(conn, "mst_ledger")
-    if "CLOSINGBALANCE" in lcols:
+    if "CLOSINGBALANCE" in lcols or "COMPUTED_CB" in lcols:
+        bc = _bal_col(conn)
         try:
             d_ph, d_groups = _nature_placeholders(conn, 'debtors')
             total_debtors = _safe_fetchone_val(conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
+                SELECT COALESCE(SUM(ABS(CAST({bc} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({d_ph})
             """, d_groups))
             c_ph, c_groups = _nature_placeholders(conn, 'creditors')
             total_creditors = _safe_fetchone_val(conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
+                SELECT COALESCE(SUM(ABS(CAST({bc} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({c_ph})
             """, c_groups))
         except sqlite3.OperationalError:

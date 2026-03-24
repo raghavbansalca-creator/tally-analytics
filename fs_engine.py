@@ -566,10 +566,11 @@ class TallyDataExtractor:
 
         cursor = self.connection.cursor()
 
-        # Verify required columns exist
+        # Verify required columns exist — prefer COMPUTED_CB
         ledger_cols = get_table_columns(self.connection, "mst_ledger")
-        if "CLOSINGBALANCE" not in ledger_cols:
-            logger.error("mst_ledger missing CLOSINGBALANCE column")
+        bc = "COMPUTED_CB" if "COMPUTED_CB" in ledger_cols else "CLOSINGBALANCE"
+        if bc not in ledger_cols:
+            logger.error(f"mst_ledger missing {bc} column")
             return TrialBalance(
                 total_debits=Decimal(0), total_credits=Decimal(0),
                 net_balance=Decimal(0), ledger_count=0,
@@ -580,9 +581,9 @@ class TallyDataExtractor:
 
         cursor.execute(
             f"""
-            SELECT NAME, PARENT, {ob_col} as OPENINGBALANCE, CLOSINGBALANCE
+            SELECT NAME, PARENT, {ob_col} as OPENINGBALANCE, {bc} as CLOSINGBALANCE
             FROM mst_ledger
-            WHERE CLOSINGBALANCE IS NOT NULL AND CLOSINGBALANCE != ''
+            WHERE {bc} IS NOT NULL AND {bc} != ''
             ORDER BY NAME
             """
         )

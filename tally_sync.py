@@ -578,6 +578,34 @@ def sync_all(host, port=9000, db_path="tally_data.db", progress_callback=None):
         conn.execute("INSERT INTO _metadata VALUES (?, ?)", ("company_pan", company_info["INCOMETAXNUMBER"]))
     conn.commit()
 
+    # Step 4: Compute closing balances from transactions
+    step = "Computing closing balances..."
+    print(f"\n--- BALANCE COMPUTATION ---")
+    print(step)
+    if progress_callback:
+        progress_callback(step, 0, 1)
+
+    try:
+        from balance_computer import update_computed_balances
+        verification = update_computed_balances(db_path)
+        all_stats["balance_verification"] = verification
+        matched = verification.get("matched", 0)
+        total_cb = verification.get("with_tally_cb", 0)
+        mismatched = verification.get("mismatched", 0)
+        print(f"  Computed balances for {verification.get('total_ledgers', 0)} ledgers")
+        print(f"  Verification: {matched}/{total_cb} matched Tally")
+        if mismatched > 0:
+            print(f"  WARNING: {mismatched} mismatches detected!")
+            for m in verification.get("mismatch_details", [])[:5]:
+                print(f"    {m['name']}: computed={m['computed']:,.2f}, tally={m['tally']:,.2f}")
+        pl_c = verification.get("pl_profit_computed", 0)
+        pl_t = verification.get("pl_profit_tally", 0)
+        print(f"  P&L: Computed={pl_c:,.2f}, Tally={pl_t:,.2f}, Match={abs(pl_c - pl_t) < 1}")
+    except Exception as e:
+        print(f"  WARNING: Balance computation failed: {e}")
+        import traceback
+        traceback.print_exc()
+
     # Summary
     finished = datetime.datetime.now()
     elapsed = (finished - started).total_seconds()

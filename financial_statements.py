@@ -265,12 +265,20 @@ def _get_all_groups_under(conn, root_groups):
     return all_groups
 
 
+def _bal_col_fs(conn):
+    """Return the best balance column: COMPUTED_CB if available, else CLOSINGBALANCE."""
+    if column_exists(conn, "mst_ledger", "COMPUTED_CB"):
+        return "COMPUTED_CB"
+    return "CLOSINGBALANCE"
+
+
 def _get_ledger_balances(conn, group_names, exclude_groups=None, exclude_names=None):
     """Get sum of closing balances for ledgers under given groups.
     Safe for ANY company - handles missing groups gracefully."""
     if not group_names:
         return 0.0
-    if not table_exists(conn, "mst_ledger") or not column_exists(conn, "mst_ledger", "CLOSINGBALANCE"):
+    bc = _bal_col_fs(conn)
+    if not table_exists(conn, "mst_ledger") or not column_exists(conn, "mst_ledger", bc):
         return 0.0
 
     all_groups = set()
@@ -288,7 +296,7 @@ def _get_ledger_balances(conn, group_names, exclude_groups=None, exclude_names=N
 
     placeholders = ",".join(["?"] * len(all_groups))
     sql = f"""
-    SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0)
+    SELECT COALESCE(SUM(CAST({bc} AS REAL)), 0)
     FROM mst_ledger
     WHERE PARENT IN ({placeholders})
     """
@@ -307,9 +315,10 @@ def _get_direct_ledger_balances(conn, group_names, exclude_names=None):
     """Get sum of closing balances for ledgers DIRECTLY under given groups."""
     if not group_names:
         return 0.0
+    bc = _bal_col_fs(conn)
     placeholders = ",".join(["?"] * len(group_names))
     sql = f"""
-    SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0)
+    SELECT COALESCE(SUM(CAST({bc} AS REAL)), 0)
     FROM mst_ledger
     WHERE PARENT IN ({placeholders})
     """
@@ -326,9 +335,10 @@ def _get_ledger_balances_by_name(conn, match_names, parent_groups=None):
     """Get sum of closing balances for ledgers matching name patterns."""
     if not match_names:
         return 0.0
+    bc = _bal_col_fs(conn)
     conditions = " OR ".join(["LOWER(NAME) LIKE ?" for _ in match_names])
     params = [f"%{n.lower()}%" for n in match_names]
-    sql = f"SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE ({conditions})"
+    sql = f"SELECT COALESCE(SUM(CAST({bc} AS REAL)), 0) FROM mst_ledger WHERE ({conditions})"
     if parent_groups:
         all_groups = set()
         conn2 = conn
@@ -356,9 +366,10 @@ def _get_ledger_details(conn, group_names, exclude_groups=None, exclude_names=No
     if not all_groups:
         return []
     placeholders = ",".join(["?"] * len(all_groups))
+    bc = _bal_col_fs(conn)
     sql = f"""
     SELECT NAME, PARENT, CAST(OPENINGBALANCE AS REAL) as ob,
-           CAST(CLOSINGBALANCE AS REAL) as cb
+           CAST({bc} AS REAL) as cb
     FROM mst_ledger WHERE PARENT IN ({placeholders})
     """
     params = list(all_groups)
@@ -374,10 +385,11 @@ def _get_direct_ledger_details(conn, group_names, exclude_names=None):
     """Get individual ledger details DIRECTLY under given groups."""
     if not group_names:
         return []
+    bc = _bal_col_fs(conn)
     placeholders = ",".join(["?"] * len(group_names))
     sql = f"""
     SELECT NAME, PARENT, CAST(OPENINGBALANCE AS REAL) as ob,
-           CAST(CLOSINGBALANCE AS REAL) as cb
+           CAST({bc} AS REAL) as cb
     FROM mst_ledger WHERE PARENT IN ({placeholders})
     """
     params = list(group_names)
@@ -407,9 +419,10 @@ def _get_stock_ledger_balances(conn):
     try:
         if not table_exists(conn, "mst_ledger"):
             return 0, 0, []
-        rows = conn.execute("""
+        bc = _bal_col_fs(conn)
+        rows = conn.execute(f"""
             SELECT NAME, CAST(OPENINGBALANCE AS REAL) as ob,
-                   CAST(CLOSINGBALANCE AS REAL) as cb
+                   CAST({bc} AS REAL) as cb
             FROM mst_ledger WHERE PARENT IN (
                 SELECT NAME FROM mst_group
                 WHERE NAME = 'Stock-in-Hand'
@@ -465,9 +478,10 @@ def extract_balance_sheet_data(conn):
     Safe: handles companies with no fixed assets, no loans, custom groups, etc."""
 
     # Get deferred tax raw value (sum of ALL deferred tax ledgers)
+    bc = _bal_col_fs(conn)
     try:
         dt_row = conn.execute(
-            "SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
+            f"SELECT COALESCE(SUM(CAST({bc} AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
         ).fetchone()
         dt_value = safe_float(dt_row[0]) if dt_row else 0.0
     except Exception:
@@ -487,7 +501,7 @@ def extract_balance_sheet_data(conn):
                 amt = _compute_item_amount(conn, config, side="liability")
                 try:
                     pl_row = conn.execute(
-                        "SELECT CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
+                        f"SELECT CAST({bc} AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
                     ).fetchone()
                     if pl_row and pl_row[0]:
                         amt += safe_float(pl_row[0])
@@ -504,7 +518,7 @@ def extract_balance_sheet_data(conn):
                 if all_grps:
                     ph = ",".join(["?"] * len(all_grps))
                     row = conn.execute(
-                        f"SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE PARENT IN ({ph})",
+                        f"SELECT COALESCE(SUM(CAST({bc} AS REAL)), 0) FROM mst_ledger WHERE PARENT IN ({ph})",
                         list(all_grps)
                     ).fetchone()
                     amt = row[0] if row else 0.0
@@ -580,8 +594,9 @@ def extract_balance_sheet_data(conn):
                         all_groups_used.add(g)
 
             # Find ledgers NOT in any classified group
+            bc = _bal_col_fs(conn)
             all_ledger_rows = conn.execute(
-                "SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE CLOSINGBALANCE IS NOT NULL"
+                f"SELECT NAME, PARENT, CAST({bc} AS REAL) FROM mst_ledger WHERE {bc} IS NOT NULL"
             ).fetchall()
             unclassified = []
             unclassified_total = 0.0
@@ -668,9 +683,10 @@ def extract_pl_data(conn):
     profit_before_tax = total_income - total_expenses
 
     # Tax - safe access
+    bc = _bal_col_fs(conn)
     try:
         dt_row = conn.execute(
-            "SELECT COALESCE(SUM(CAST(CLOSINGBALANCE AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
+            f"SELECT COALESCE(SUM(CAST({bc} AS REAL)), 0) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
         ).fetchone()
         dt_value = safe_float(dt_row[0]) if dt_row else 0.0
     except Exception:
@@ -689,7 +705,7 @@ def extract_pl_data(conn):
     # Current tax from Provision for Corporate Tax or similar
     try:
         ct_row = conn.execute(
-            "SELECT CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE '%provision for%tax%'"
+            f"SELECT CAST({bc} AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE '%provision for%tax%'"
         ).fetchone()
         current_tax = abs(safe_float(ct_row[0])) if ct_row and ct_row[0] else 0.0
     except Exception:
@@ -735,9 +751,10 @@ def extract_notes_data(conn, bs_data, pl_data):
 
     # Note 3: Reserves and Surplus
     rs_ledgers = _get_ledger_details(conn, ["Reserves & Surplus"])
+    bc = _bal_col_fs(conn)
     try:
         pl_row = conn.execute(
-            "SELECT CAST(OPENINGBALANCE AS REAL), CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
+            f"SELECT CAST(OPENINGBALANCE AS REAL), CAST({bc} AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
         ).fetchone()
         pl_ob = safe_float(pl_row[0]) if pl_row else 0.0
         pl_cb = safe_float(pl_row[1]) if pl_row else 0.0
@@ -765,7 +782,7 @@ def extract_notes_data(conn, bs_data, pl_data):
 
     # Note 5: Deferred Tax
     dt_ledgers = conn.execute(
-        "SELECT NAME, CAST(OPENINGBALANCE AS REAL), CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
+        f"SELECT NAME, CAST(OPENINGBALANCE AS REAL), CAST({bc} AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE '%deferred tax%'"
     ).fetchall()
     notes["5"] = {
         "title": "Deferred Tax Liability / (Asset)",
@@ -938,8 +955,9 @@ def extract_notes_data(conn, bs_data, pl_data):
     fc_names = ["interest", "bank charges", "bank od interest"]
     fc_conditions = " OR ".join(["LOWER(NAME) LIKE ?" for _ in fc_names])
     fc_params = [f"%{n}%" for n in fc_names]
+    bc = _bal_col_fs(conn)
     fc_ledgers = conn.execute(
-        f"SELECT NAME, PARENT, CAST(OPENINGBALANCE AS REAL), CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE ({fc_conditions}) AND CAST(CLOSINGBALANCE AS REAL) != 0",
+        f"SELECT NAME, PARENT, CAST(OPENINGBALANCE AS REAL), CAST({bc} AS REAL) FROM mst_ledger WHERE ({fc_conditions}) AND CAST({bc} AS REAL) != 0",
         fc_params
     ).fetchall()
     notes["22"] = {

@@ -1048,7 +1048,9 @@ def gstr3b_summary(conn, month=None):
         cn_igst = 0.0
 
         try:
-            rows = conn.execute("SELECT name, CLOSINGBALANCE FROM mst_ledger").fetchall()
+            _gst_cols = {r[1] for r in conn.execute("PRAGMA table_info(mst_ledger)").fetchall()}
+            _gst_bc = "COMPUTED_CB" if "COMPUTED_CB" in _gst_cols else "CLOSINGBALANCE"
+            rows = conn.execute(f"SELECT name, {_gst_bc} FROM mst_ledger").fetchall()
         except Exception:
             rows = []
         for name, cb in rows:

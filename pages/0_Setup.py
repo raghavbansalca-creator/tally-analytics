@@ -84,6 +84,17 @@ with col2:
             metric_card("Ledgers", f"{counts.get('mst_ledger', 0):,}", color_class="green")
             metric_card("Vouchers", f"{counts.get('trn_voucher', 0):,}", color_class="amber")
             metric_card("Entries", f"{counts.get('trn_accounting', 0):,}", color_class="purple")
+
+            # Balance verification status
+            try:
+                bv_cols = {r[1] for r in conn.execute("PRAGMA table_info(mst_ledger)").fetchall()}
+                if "COMPUTED_CB" in bv_cols:
+                    bv_row = conn.execute("SELECT COUNT(*) FROM _balance_verification WHERE MATCH = 'Yes'").fetchone()
+                    bv_total = conn.execute("SELECT COUNT(*) FROM _balance_verification WHERE TALLY_CB IS NOT NULL").fetchone()
+                    if bv_row and bv_total:
+                        metric_card("Balance Verified", f"{bv_row[0]}/{bv_total[0]}", color_class="green")
+            except Exception:
+                pass
         except Exception as e:
             st.warning(f"Database exists but error reading: {e}")
     else:
@@ -197,6 +208,32 @@ with col_sync:
                     scol6.metric("Voucher Types", stats.get("voucher_types", 0))
                     scol7.metric("Cost Centres", stats.get("cost_centres", 0))
                     scol8.metric("Godowns", stats.get("godowns", 0))
+
+                # Balance verification results
+                bv = result.get("balance_verification")
+                if bv:
+                    section_header("Balance Verification")
+                    bv_matched = bv.get("matched", 0)
+                    bv_total = bv.get("with_tally_cb", 0)
+                    bv_mismatched = bv.get("mismatched", 0)
+                    pl_computed = bv.get("pl_profit_computed", 0)
+                    pl_tally = bv.get("pl_profit_tally", 0)
+                    pl_match = abs(pl_computed - pl_tally) < 1
+
+                    bvcol1, bvcol2, bvcol3 = st.columns(3)
+                    bvcol1.metric("Ledger Balances Verified", f"{bv_matched}/{bv_total}")
+                    bvcol2.metric("Computed Balances", f"{bv.get('total_ledgers', 0)}")
+                    if pl_match:
+                        bvcol3.metric("P&L Match", f"Rs {pl_computed:,.0f}")
+                    else:
+                        bvcol3.metric("P&L MISMATCH", f"Computed: Rs {pl_computed:,.0f}", delta=f"Tally: Rs {pl_tally:,.0f}", delta_color="inverse")
+
+                    if bv_mismatched > 0:
+                        st.warning(f"{bv_mismatched} ledger(s) have balance mismatches between computed and Tally values")
+                        for m in bv.get("mismatch_details", [])[:10]:
+                            st.text(f"  {m['name']}: computed={m['computed']:,.2f}, tally={m['tally']:,.2f}, diff={m['diff']:,.2f}")
+                    else:
+                        st.success("All ledger balances verified successfully")
 
                 st.markdown("---")
                 st.markdown("**Go to the main dashboard to start analyzing!** Use the sidebar to navigate.")

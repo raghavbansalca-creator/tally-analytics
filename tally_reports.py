@@ -42,6 +42,12 @@ def clear_col_cache():
     _TABLE_COLS.clear()
 
 
+def _bal_col(conn):
+    """Return the best balance column: COMPUTED_CB if available, else CLOSINGBALANCE."""
+    cols = _get_cols(conn, "mst_ledger")
+    return "COMPUTED_CB" if "COMPUTED_CB" in cols else "CLOSINGBALANCE"
+
+
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
@@ -237,7 +243,7 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=Non
 
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
-    has_cb = "CLOSINGBALANCE" in lcols
+    has_cb = "COMPUTED_CB" in lcols or "CLOSINGBALANCE" in lcols
 
     placeholders = ",".join(["?"] * len(group_names))
 
@@ -288,8 +294,9 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=Non
         except sqlite3.OperationalError:
             rows = []
     elif has_cb:
+        bc = _bal_col(conn)
         sql = f"""
-        SELECT PARENT, NAME, CAST(CLOSINGBALANCE AS REAL) as balance
+        SELECT PARENT, NAME, CAST({bc} AS REAL) as balance
         FROM mst_ledger
         WHERE PARENT IN ({placeholders})
         ORDER BY PARENT, NAME
@@ -333,7 +340,7 @@ def trial_balance(conn, as_of_date=None, date_from=None, date_to=None):
     Returns list of (group, ledger, debit, credit)."""
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
-    has_cb = "CLOSINGBALANCE" in lcols
+    has_cb = "COMPUTED_CB" in lcols or "CLOSINGBALANCE" in lcols
 
     if date_from or date_to:
         date_cond = ""
@@ -380,8 +387,9 @@ def trial_balance(conn, as_of_date=None, date_from=None, date_to=None):
         except sqlite3.OperationalError:
             rows = []
     elif has_cb:
-        sql = """
-        SELECT PARENT, NAME, CAST(CLOSINGBALANCE AS REAL) as balance
+        bc = _bal_col(conn)
+        sql = f"""
+        SELECT PARENT, NAME, CAST({bc} AS REAL) as balance
         FROM mst_ledger
         ORDER BY PARENT, NAME
         """
@@ -708,7 +716,7 @@ def debtor_aging(conn, date_from=None, date_to=None):
     When date_from/date_to provided, computes opening + transactions in range."""
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
-    has_cb = "CLOSINGBALANCE" in lcols
+    has_cb = "COMPUTED_CB" in lcols or "CLOSINGBALANCE" in lcols
 
     debtor_groups = get_groups_by_nature(conn, 'debtors')
     placeholders = ",".join(["?"] * len(debtor_groups))
@@ -742,12 +750,13 @@ def debtor_aging(conn, date_from=None, date_to=None):
         except sqlite3.OperationalError:
             rows = []
     elif has_cb:
+        bc = _bal_col(conn)
         sql = f"""
-        SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
+        SELECT NAME, CAST({bc} AS REAL) as balance
         FROM mst_ledger
         WHERE PARENT IN ({placeholders})
-          AND CAST(CLOSINGBALANCE AS REAL) != 0
-        ORDER BY CAST(CLOSINGBALANCE AS REAL)
+          AND CAST({bc} AS REAL) != 0
+        ORDER BY CAST({bc} AS REAL)
         """
         try:
             rows = conn.execute(sql, group_params).fetchall()
@@ -782,7 +791,7 @@ def creditor_aging(conn, date_from=None, date_to=None):
     When date_from/date_to provided, computes opening + transactions in range."""
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
-    has_cb = "CLOSINGBALANCE" in lcols
+    has_cb = "COMPUTED_CB" in lcols or "CLOSINGBALANCE" in lcols
 
     creditor_groups = get_groups_by_nature(conn, 'creditors')
     placeholders = ",".join(["?"] * len(creditor_groups))
@@ -816,12 +825,13 @@ def creditor_aging(conn, date_from=None, date_to=None):
         except sqlite3.OperationalError:
             rows = []
     elif has_cb:
+        bc = _bal_col(conn)
         sql = f"""
-        SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
+        SELECT NAME, CAST({bc} AS REAL) as balance
         FROM mst_ledger
         WHERE PARENT IN ({placeholders})
-          AND CAST(CLOSINGBALANCE AS REAL) != 0
-        ORDER BY CAST(CLOSINGBALANCE AS REAL)
+          AND CAST({bc} AS REAL) != 0
+        ORDER BY CAST({bc} AS REAL)
         """
         try:
             rows = conn.execute(sql, group_params).fetchall()
@@ -962,8 +972,9 @@ def godown_summary(conn):
 def search_ledger(conn, query):
     """Search ledgers by name (fuzzy)."""
     lcols = _get_cols(conn, "mst_ledger")
-    has_cb = "CLOSINGBALANCE" in lcols
-    balance_col = "CAST(CLOSINGBALANCE AS REAL)" if has_cb else "0"
+    has_cb = "COMPUTED_CB" in lcols or "CLOSINGBALANCE" in lcols or "COMPUTED_CB" in lcols
+    bc = _bal_col(conn)
+    balance_col = f"CAST({bc} AS REAL)" if has_cb else "0"
     try:
         sql = f"""
         SELECT NAME, PARENT, {balance_col} as balance

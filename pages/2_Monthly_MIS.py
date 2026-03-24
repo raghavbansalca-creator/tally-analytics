@@ -386,13 +386,15 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     _bk_groups = list(dict.fromkeys(_bk_groups))  # deduplicate
     _bk_ph = ",".join(["?"] * len(_bk_groups)) if _bk_groups else "'__NONE__'"
     _bk_g = _bk_groups
+    _mis_cols = {r[1] for r in conn.execute("PRAGMA table_info(mst_ledger)").fetchall()}
+    _mis_bc = "COMPUTED_CB" if "COMPUTED_CB" in _mis_cols else "CLOSINGBALANCE"
     rows = conn.execute(f"""
         SELECT NAME, PARENT,
                CAST(OPENINGBALANCE AS REAL) as opening,
-               CAST(CLOSINGBALANCE AS REAL) as closing
+               CAST({_mis_bc} AS REAL) as closing
         FROM mst_ledger
         WHERE PARENT IN ({_bk_ph})
-        ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
+        ORDER BY ABS(CAST({_mis_bc} AS REAL)) DESC
     """, _bk_g).fetchall()
     data["bank_balances"] = rows
 
@@ -400,11 +402,11 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     _d_ph, _d_g = _nature_ph(conn, 'debtors')
     _c_ph, _c_g = _nature_ph(conn, 'creditors')
     data["total_debtors"] = conn.execute(
-        f"SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_d_ph})",
+        f"SELECT COALESCE(SUM(ABS(CAST({_mis_bc} AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_d_ph})",
         _d_g
     ).fetchone()[0]
     data["total_creditors"] = conn.execute(
-        f"SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_c_ph})",
+        f"SELECT COALESCE(SUM(ABS(CAST({_mis_bc} AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_c_ph})",
         _c_g
     ).fetchone()[0]
 

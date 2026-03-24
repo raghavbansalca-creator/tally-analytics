@@ -588,18 +588,28 @@ def check_negative_cash(conn):
 # 8. DEBIT BALANCE IN CREDITORS
 # ════════════════════════════════════════════════════════════════════════════
 
+def _bal_col_ae(conn):
+    """Return best balance column: COMPUTED_CB if available, else CLOSINGBALANCE."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(mst_ledger)").fetchall()}
+        return "COMPUTED_CB" if "COMPUTED_CB" in cols else "CLOSINGBALANCE"
+    except Exception:
+        return "CLOSINGBALANCE"
+
+
 def check_debit_balance_creditors(conn):
     """Creditors with debit balance = overpayment, mapping error, or misappropriation."""
     cur = conn.cursor()
     try:
+        bc = _bal_col_ae(conn)
         _cr_groups = get_groups_by_nature(conn, 'creditors')
         _cr_ph = ",".join(["?"] * len(_cr_groups)) if _cr_groups else "'__NONE__'"
         cur.execute(f"""
-            SELECT NAME, CLOSINGBALANCE FROM mst_ledger
+            SELECT NAME, {bc} AS CLOSINGBALANCE FROM mst_ledger
             WHERE PARENT IN ({_cr_ph})
-            AND CLOSINGBALANCE IS NOT NULL AND CLOSINGBALANCE != ''
-            AND CAST(CLOSINGBALANCE AS REAL) > 0
-            ORDER BY CAST(CLOSINGBALANCE AS REAL) DESC
+            AND {bc} IS NOT NULL AND {bc} != ''
+            AND CAST({bc} AS REAL) > 0
+            ORDER BY CAST({bc} AS REAL) DESC
         """, _cr_groups)
         # In Tally, creditors normally have negative (credit) balance
         # Positive = debit balance = unusual
@@ -636,14 +646,15 @@ def check_credit_balance_debtors(conn):
     """Debtors with credit balance = advance received not adjusted, or fictitious debtors."""
     cur = conn.cursor()
     try:
+        bc = _bal_col_ae(conn)
         _dr_groups = get_groups_by_nature(conn, 'debtors')
         _dr_ph = ",".join(["?"] * len(_dr_groups)) if _dr_groups else "'__NONE__'"
         cur.execute(f"""
-            SELECT NAME, CLOSINGBALANCE FROM mst_ledger
+            SELECT NAME, {bc} AS CLOSINGBALANCE FROM mst_ledger
             WHERE PARENT IN ({_dr_ph})
-            AND CLOSINGBALANCE IS NOT NULL AND CLOSINGBALANCE != ''
-            AND CAST(CLOSINGBALANCE AS REAL) < 0
-            ORDER BY CAST(CLOSINGBALANCE AS REAL) ASC
+            AND {bc} IS NOT NULL AND {bc} != ''
+            AND CAST({bc} AS REAL) < 0
+            ORDER BY CAST({bc} AS REAL) ASC
         """, _dr_groups)
         # In Tally, debtors normally have positive (debit) balance
         # Negative = credit balance = unusual

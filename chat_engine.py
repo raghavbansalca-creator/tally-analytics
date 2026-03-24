@@ -79,6 +79,13 @@ def _has_column(conn, table_name, column_name):
         return False
 
 
+def _bal_col(conn):
+    """Return the best balance column: COMPUTED_CB if available, else CLOSINGBALANCE."""
+    if _has_column(conn, "mst_ledger", "COMPUTED_CB"):
+        return "COMPUTED_CB"
+    return "CLOSINGBALANCE"
+
+
 def _safe_fetchone(cursor_result):
     """Safely get fetchone result, returning None on failure."""
     try:
@@ -235,14 +242,14 @@ def _build_data_context(question):
         # Bank balances
         if any(kw in q for kw in ["bank", "cash", "balance", "money", "fund", "liquid"]):
             try:
-                has_closing = _has_column(conn, "mst_ledger", "CLOSINGBALANCE")
+                has_closing = _has_column(conn, "mst_ledger", "COMPUTED_CB") or _has_column(conn, "mst_ledger", "CLOSINGBALANCE")
                 if has_closing:
                     _bk_ph, _bk_g = _nature_ph_bank_cash(conn)
                     rows = conn.execute(f"""
-                        SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as bal
+                        SELECT NAME, PARENT, CAST({_bal_col(conn)} AS REAL) as bal
                         FROM mst_ledger
                         WHERE PARENT IN ({_bk_ph})
-                        ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
+                        ORDER BY ABS(CAST({_bal_col(conn)} AS REAL)) DESC
                     """, _bk_g).fetchall()
                     rows = rows or []
                     lines = ["BANK & CASH BALANCES:"]
@@ -397,11 +404,12 @@ WORKING CAPITAL:
                 name_part = q.split(pk, 1)[1].strip().rstrip("?.,!")
                 if name_part and len(name_part) > 2:
                     try:
-                        matches = conn.execute("""
-                            SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL)
+                        bc = _bal_col(conn)
+                        matches = conn.execute(f"""
+                            SELECT NAME, PARENT, CAST({bc} AS REAL)
                             FROM mst_ledger
                             WHERE LOWER(NAME) LIKE ?
-                            ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC LIMIT 5
+                            ORDER BY ABS(CAST({bc} AS REAL)) DESC LIMIT 5
                         """, (f"%{name_part}%",)).fetchall()
                         if matches:
                             lines = [f"LEDGER SEARCH for '{name_part}':"]
@@ -509,7 +517,7 @@ DATABASE SCHEMA (SQLite):
    BS groups: ISREVENUE='No' (all others)
 
 2. mst_ledger - All accounts (480 ledgers)
-   Columns: NAME, PARENT, OPENINGBALANCE, CLOSINGBALANCE, GUID, ALTERID, COUNTRYOFRESIDENCE, ISREVENUE, AFFECTSSTOCK, CLOSINGBALANCE, CREDITLIMIT, LEDGERSTATENAME, LEDGERMOBILE_LIST, LEDGERPHONE_LIST
+   Columns: NAME, PARENT, OPENINGBALANCE, CLOSINGBALANCE, COMPUTED_CB (preferred), GUID, ALTERID, COUNTRYOFRESIDENCE, ISREVENUE, AFFECTSSTOCK, CREDITLIMIT, LEDGERSTATENAME, LEDGERMOBILE_LIST, LEDGERPHONE_LIST
    Key groups: Sundry Debtors (315), Sundry Creditors (35), Duties & Taxes (30), Indirect Expenses (18)
 
 3. mst_stock_item - Inventory items (185 items)
@@ -740,8 +748,9 @@ def _fuzzy_match_party(conn, query_name):
         return None
 
     # First try exact match (case-insensitive)
+    bc = _bal_col(conn)
     row = conn.execute(
-        "SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE LOWER(NAME) = LOWER(?)",
+        f"SELECT NAME, PARENT, CAST({bc} AS REAL) FROM mst_ledger WHERE LOWER(NAME) = LOWER(?)",
         (query_name,)
     ).fetchone()
     if row:
@@ -749,7 +758,7 @@ def _fuzzy_match_party(conn, query_name):
 
     # Try LIKE match
     results = conn.execute(
-        "SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE LOWER(?) ORDER BY NAME LIMIT 10",
+        f"SELECT NAME, PARENT, CAST({bc} AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE LOWER(?) ORDER BY NAME LIMIT 10",
         (f"%{query_name}%",)
     ).fetchall()
     if results:
@@ -763,7 +772,7 @@ def _fuzzy_match_party(conn, query_name):
         for word in words:
             if len(word) >= 3:
                 results = conn.execute(
-                    "SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE LOWER(?) ORDER BY NAME LIMIT 5",
+                    f"SELECT NAME, PARENT, CAST({bc} AS REAL) FROM mst_ledger WHERE LOWER(NAME) LIKE LOWER(?) ORDER BY NAME LIMIT 5",
                     (f"%{word}%",)
                 ).fetchall()
                 if results:
@@ -1048,10 +1057,10 @@ def smart_answer(question):
                                    "cash in hand", "cash on hand"]):
             _bk2_ph, _bk2_g = _nature_ph_bank_cash(conn)
             rows = conn.execute(f"""
-                SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as bal
+                SELECT NAME, PARENT, CAST({_bal_col(conn)} AS REAL) as bal
                 FROM mst_ledger
                 WHERE PARENT IN ({_bk2_ph})
-                ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
+                ORDER BY ABS(CAST({_bal_col(conn)} AS REAL)) DESC
             """, _bk2_g).fetchall()
             total = sum(abs(r[2] or 0) for r in rows)
             lines = [f"**Cash & Bank Position ({_get_company_name()})**\n"]
