@@ -20,6 +20,11 @@ from tds_engine import (
 
 st.set_page_config(page_title="TDS Analysis -- SLV", page_icon="T", layout="wide")
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from styles import inject_base_styles, page_header, section_header, metric_card, fmt, fmt_full, badge, footer
+inject_base_styles()
+
 # ======================================================================
 #  SESSION STATE DEFAULTS
 # ======================================================================
@@ -34,103 +39,6 @@ for k, v in _defaults.items():
         st.session_state[k] = v
 
 # ======================================================================
-#  CSS
-# ======================================================================
-
-st.markdown("""
-<style>
-    .tds-header {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-        color: white;
-        padding: 1.2rem 1.8rem;
-        border-radius: 12px;
-        margin-bottom: 1rem;
-    }
-    .tds-header h1 { color: white; margin: 0; font-size: 1.6rem; }
-    .tds-header p { color: #94a3b8; margin: 0.2rem 0 0 0; font-size: 0.9rem; }
-
-    .metric-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
-        text-align: center;
-    }
-    .metric-card .label { color: #64748b; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
-    .metric-card .value { color: #1e293b; font-size: 1.3rem; font-weight: 700; }
-    .metric-card .value.green { color: #16a34a; }
-    .metric-card .value.red { color: #dc2626; }
-    .metric-card .value.blue { color: #2563eb; }
-    .metric-card .value.amber { color: #d97706; }
-
-    .tds-section {
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1.2rem;
-        margin-bottom: 1rem;
-    }
-    .tds-section h3 {
-        color: #1e3a5f;
-        font-size: 1rem;
-        border-bottom: 2px solid #e2e8f0;
-        padding-bottom: 0.5rem;
-        margin-bottom: 0.8rem;
-    }
-
-    table.tds-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.85rem;
-    }
-    table.tds-table th {
-        background: #f1f5f9;
-        color: #475569;
-        padding: 0.5rem 0.8rem;
-        text-align: right;
-        font-weight: 600;
-        border-bottom: 2px solid #e2e8f0;
-    }
-    table.tds-table th:first-child { text-align: left; }
-    table.tds-table th:nth-child(2) { text-align: left; }
-    table.tds-table td {
-        padding: 0.5rem 0.8rem;
-        text-align: right;
-        border-bottom: 1px solid #f1f5f9;
-        color: #334155;
-    }
-    table.tds-table td:first-child { text-align: left; }
-    table.tds-table td:nth-child(2) { text-align: left; }
-    table.tds-table tr.total-row td {
-        font-weight: 700;
-        border-top: 2px solid #1e3a5f;
-        color: #1e3a5f;
-    }
-    table.tds-table tr:hover { background: #f8fafc; }
-
-    .badge-ok { background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
-    .badge-warn { background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
-    .badge-error { background: #fecaca; color: #991b1b; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
-    .badge-info { background: #dbeafe; color: #1e40af; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
-
-    .voucher-box {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1.2rem;
-        margin-bottom: 1rem;
-    }
-
-    div.stButton > button {
-        padding: 0.1rem 0.3rem;
-        font-size: 0.8rem;
-        min-height: 0;
-        line-height: 1.2;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ======================================================================
 #  HELPERS
 # ======================================================================
 
@@ -143,13 +51,13 @@ def _status_badge(status):
     """Return HTML badge for compliance status."""
     s = status.upper() if status else ""
     if s in ("OK", "OK (NO PAN - 20%)", "BELOW_THRESHOLD"):
-        return f'<span class="badge-ok">{status}</span>'
+        return badge(status, "green")
     elif s in ("WARNING", "MINOR_DIFF", "CHECK_PAN_RATE"):
-        return f'<span class="badge-warn">{status}</span>'
+        return badge(status, "amber")
     elif s in ("BREACH", "MISMATCH", "MISSING PAN"):
-        return f'<span class="badge-error">{status}</span>'
+        return badge(status, "red")
     else:
-        return f'<span class="badge-info">{status}</span>'
+        return badge(status, "blue")
 
 
 def _month_label_short(m):
@@ -166,6 +74,21 @@ def _month_label_short(m):
 #  DATA LOAD
 # ======================================================================
 
+def _safe_div(a, b, default=0):
+    """Safe division."""
+    if not b:
+        return default
+    return a / b
+
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
 conn = get_conn()
 company_name = _get_company_name(conn)
 tds_ledgers = _detect_tds_ledgers(conn)
@@ -175,12 +98,10 @@ tds_months = get_tds_available_months(conn)
 #  HEADER
 # ======================================================================
 
-st.markdown(f"""
-<div class="tds-header">
-    <h1>TDS Analysis Dashboard</h1>
-    <p>{company_name or 'Company'} &nbsp;|&nbsp; Tax Deducted at Source &nbsp;|&nbsp; {len(tds_ledgers)} TDS ledger(s) detected</p>
-</div>
-""", unsafe_allow_html=True)
+page_header(
+    "TDS Analysis Dashboard",
+    f"{company_name or 'Company'} | Tax Deducted at Source | {len(tds_ledgers)} TDS ledger(s) detected"
+)
 
 # ======================================================================
 #  NO TDS CHECK
@@ -239,7 +160,7 @@ with st.sidebar:
 view = st.session_state.tds_view
 
 if view == "party_drill":
-    # ── PARTY DRILL-DOWN ──────────────────────────────────────────────
+    # -- PARTY DRILL-DOWN --------------------------------------------------
     party = st.session_state.tds_drill_party
     back_tab = st.session_state.tds_back_tab or "Party-wise Detail"
 
@@ -262,7 +183,7 @@ if view == "party_drill":
 
             st.markdown(f"**{len(vouchers)} voucher(s)** | Gross: **{fi(total_gross)}** | TDS: **{fi(total_tds)}**")
 
-            html = """<table class="tds-table">
+            html = """<table class="slv-table">
             <tr><th>Date</th><th>Voucher No</th><th>Type</th><th>Section</th>
                 <th>Gross Amount</th><th>TDS Amount</th><th>Narration</th></tr>"""
 
@@ -287,9 +208,9 @@ if view == "party_drill":
             st.markdown(html, unsafe_allow_html=True)
 
 else:
-    # ── MAIN DASHBOARD ────────────────────────────────────────────────
+    # -- MAIN DASHBOARD ----------------------------------------------------
 
-    # ── EXECUTIVE SUMMARY CARDS ───────────────────────────────────────
+    # -- EXECUTIVE SUMMARY CARDS -------------------------------------------
     section_data = tds_summary_by_section(conn, date_from=date_from, date_to=date_to)
     pan_data = tds_pan_check(conn)
 
@@ -298,34 +219,22 @@ else:
     sections_covered = len(section_data)
     pan_with = sum(1 for p in pan_data if p["has_pan"])
     pan_total = len(pan_data)
-    pan_pct = round((pan_with / pan_total * 100), 1) if pan_total > 0 else 0
+    pan_pct = round(_safe_div(pan_with, pan_total) * 100, 1)
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">Total TDS Deducted</div>
-            <div class="value blue">{fi(total_tds)}</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("Total TDS Deducted", fi(total_tds), color_class="blue")
     with m2:
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">Parties with TDS</div>
-            <div class="value">{total_parties}</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("Parties with TDS", str(total_parties))
     with m3:
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">Sections Covered</div>
-            <div class="value">{sections_covered}</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("Sections Covered", str(sections_covered))
     with m4:
         pan_color = "green" if pan_pct >= 90 else "amber" if pan_pct >= 70 else "red"
-        st.markdown(f"""<div class="metric-card">
-            <div class="label">PAN Compliance</div>
-            <div class="value {pan_color}">{pan_pct}%</div>
-        </div>""", unsafe_allow_html=True)
+        metric_card("PAN Compliance", f"{pan_pct}%", color_class=pan_color)
 
     st.markdown("")
 
-    # ── TABS ──────────────────────────────────────────────────────────
+    # -- TABS --------------------------------------------------------------
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Section-wise Summary",
         "Party-wise Detail",
@@ -334,16 +243,16 @@ else:
         "Compliance Checks",
     ])
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  TAB 1: SECTION-WISE SUMMARY
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     with tab1:
-        st.markdown("#### TDS by Section")
+        section_header("TDS by Section")
 
         if not section_data:
             st.info("No TDS data found for the selected period.")
         else:
-            html = """<table class="tds-table">
+            html = """<table class="slv-table">
             <tr><th>Section</th><th>Description</th><th>Rate (%)</th>
                 <th>Threshold</th><th>Parties</th><th>TDS Amount</th></tr>"""
 
@@ -370,7 +279,7 @@ else:
             # Bar chart
             if len(section_data) > 1:
                 st.markdown("")
-                st.markdown("#### TDS Distribution by Section")
+                section_header("TDS Distribution by Section")
                 import pandas as pd
                 chart_df = pd.DataFrame([
                     {"Section": s["section"], "TDS Amount": s["tds_amount"]}
@@ -378,11 +287,11 @@ else:
                 ])
                 st.bar_chart(chart_df.set_index("Section"))
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  TAB 2: PARTY-WISE DETAIL
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     with tab2:
-        st.markdown("#### Party-wise TDS Detail")
+        section_header("Party-wise TDS Detail")
 
         # Section filter
         all_sections = sorted(set(s["section"] for s in section_data)) if section_data else []
@@ -400,12 +309,12 @@ else:
         else:
             st.markdown(f"**{len(party_data)} parties**")
 
-            html = """<table class="tds-table">
+            html = """<table class="slv-table">
             <tr><th>Party</th><th>PAN</th><th>Section(s)</th>
                 <th>Gross Payment</th><th>TDS Deducted</th><th>Eff. Rate %</th><th>Vouchers</th></tr>"""
 
             for p in party_data:
-                pan_badge = p['pan'] if p['has_pan'] else '<span class="badge-error">No PAN</span>'
+                pan_badge = p['pan'] if p['has_pan'] else badge("No PAN", "red")
                 html += f"""<tr>
                     <td>{p['party']}</td>
                     <td>{pan_badge}</td>
@@ -445,11 +354,11 @@ else:
                                 st.session_state.tds_back_tab = "Party-wise Detail"
                                 st.rerun()
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  TAB 3: MONTHLY TREND
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     with tab3:
-        st.markdown("#### Monthly TDS Trend")
+        section_header("Monthly TDS Trend")
 
         monthly_data = tds_monthly_trend(conn, date_from=date_from, date_to=date_to)
 
@@ -463,7 +372,7 @@ else:
             all_sec = sorted(all_sec)
 
             # Table
-            html = '<table class="tds-table"><tr><th>Month</th>'
+            html = '<table class="slv-table"><tr><th>Month</th>'
             for sec in all_sec:
                 html += f"<th>{sec}</th>"
             html += "<th>Total TDS</th></tr>"
@@ -488,7 +397,7 @@ else:
             # Chart
             if len(monthly_data) > 1:
                 st.markdown("")
-                st.markdown("#### TDS Trend Chart")
+                section_header("TDS Trend Chart")
                 import pandas as pd
                 chart_data = pd.DataFrame([
                     {"Month": m["month_label"], "TDS Amount": m["total_tds"]}
@@ -496,11 +405,11 @@ else:
                 ])
                 st.bar_chart(chart_data.set_index("Month"))
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  TAB 4: QUARTERLY RETURNS
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     with tab4:
-        st.markdown("#### Quarterly TDS Summary (for Return Filing)")
+        section_header("Quarterly TDS Summary (for Return Filing)")
         st.markdown("*24Q - Salary | 26Q - Non-salary | 27Q - Non-resident*")
 
         quarterly_data = tds_quarterly_summary(conn, date_from=date_from, date_to=date_to)
@@ -514,7 +423,7 @@ else:
                 all_sec_q.update(q["sections"].keys())
             all_sec_q = sorted(all_sec_q)
 
-            html = '<table class="tds-table"><tr><th>Quarter</th><th>Parties</th>'
+            html = '<table class="slv-table"><tr><th>Quarter</th><th>Parties</th>'
             for sec in all_sec_q:
                 html += f"<th>{sec}</th>"
             html += "<th>Total TDS</th></tr>"
@@ -559,11 +468,11 @@ else:
             if guidance_parts:
                 st.info("Returns to be filed: " + " | ".join(guidance_parts))
 
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     #  TAB 5: COMPLIANCE CHECKS
-    # ══════════════════════════════════════════════════════════════════
+    # ==================================================================
     with tab5:
-        st.markdown("#### TDS Compliance Checks")
+        section_header("TDS Compliance Checks")
 
         check1, check2, check3 = st.tabs([
             "Threshold Breaches",
@@ -571,7 +480,7 @@ else:
             "Rate Mismatches",
         ])
 
-        # ── Threshold Breaches ────────────────────────────────────────
+        # -- Threshold Breaches ----------------------------------------
         with check1:
             st.markdown("##### Parties where payments may exceed TDS thresholds")
             st.markdown("*Checks payments under Indirect Expenses for threshold breaches without TDS deduction.*")
@@ -589,7 +498,7 @@ else:
                 if warnings:
                     st.warning(f"{len(warnings)} payment(s) approaching threshold limits.")
 
-                html = """<table class="tds-table">
+                html = """<table class="slv-table">
                 <tr><th>Party</th><th>Section</th><th>Total Payment</th>
                     <th>Threshold</th><th>TDS Deducted?</th><th>Status</th></tr>"""
 
@@ -606,7 +515,7 @@ else:
                 html += "</table>"
                 st.markdown(html, unsafe_allow_html=True)
 
-        # ── Missing PAN ───────────────────────────────────────────────
+        # -- Missing PAN -----------------------------------------------
         with check2:
             st.markdown("##### PAN Availability Check")
             st.markdown("*Without PAN, TDS must be deducted at 20% (higher rate under Section 206AA).*")
@@ -626,7 +535,7 @@ else:
                 if missing_pan:
                     st.error(f"{len(missing_pan)} party/parties without PAN -- 20% TDS rate applies!")
 
-                    html = """<table class="tds-table">
+                    html = """<table class="slv-table">
                     <tr><th>Party</th><th>TDS Amount</th><th>Status</th></tr>"""
                     for p in missing_pan:
                         html += f"""<tr>
@@ -641,7 +550,7 @@ else:
 
                 # Show full list
                 with st.expander("View all parties with PAN status"):
-                    html = """<table class="tds-table">
+                    html = """<table class="slv-table">
                     <tr><th>Party</th><th>PAN</th><th>TDS Amount</th><th>Status</th></tr>"""
                     for p in pan_data:
                         pan_display = p['pan'] if p['has_pan'] else '-'
@@ -654,7 +563,7 @@ else:
                     html += "</table>"
                     st.markdown(html, unsafe_allow_html=True)
 
-        # ── Rate Mismatches ───────────────────────────────────────────
+        # -- Rate Mismatches -------------------------------------------
         with check3:
             st.markdown("##### TDS Rate Verification")
             st.markdown("*Compares effective TDS rate with standard rate for each section.*")
@@ -674,7 +583,7 @@ else:
                 if not mismatches and not minor:
                     st.success("All TDS rates appear to be within expected ranges.")
 
-                html = """<table class="tds-table">
+                html = """<table class="slv-table">
                 <tr><th>Party</th><th>PAN</th><th>Section(s)</th>
                     <th>Gross Payment</th><th>TDS Amount</th>
                     <th>Eff. Rate %</th><th>Expected %</th><th>Status</th></tr>"""
@@ -698,7 +607,7 @@ else:
 
                 # Reference table
                 with st.expander("TDS Rate Reference"):
-                    ref_html = """<table class="tds-table">
+                    ref_html = """<table class="slv-table">
                     <tr><th>Section</th><th>Payment Type</th><th>Rate (%)</th><th>Threshold (per year)</th></tr>"""
                     for sec, info in sorted(TDS_SECTIONS.items()):
                         if sec == "Other":
@@ -739,3 +648,5 @@ try:
         chat_conn.close()
 except ImportError:
     pass
+
+footer(company_name)

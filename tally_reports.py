@@ -4,12 +4,42 @@ SQL templates for standard accounting reports against SQLite.
 All amounts in Tally: positive = credit/income side, negative = debit/expense side.
 For debtors: closing balance negative means they owe us (receivable).
 ISDEEMEDPOSITIVE = Yes means the natural balance is debit (assets/expenses).
+Defensive coding: works with ANY company's Tally data.
 """
 
 import sqlite3
 import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
+
+# ── SHARED DEFENSIVE UTILITIES ────────────────────────────────────────────
+_TABLE_COLS = {}
+
+
+def _get_cols(conn, table):
+    """Return set of column names for a table (cached per session)."""
+    if table not in _TABLE_COLS:
+        try:
+            _TABLE_COLS[table] = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except sqlite3.OperationalError:
+            _TABLE_COLS[table] = set()
+    return _TABLE_COLS[table]
+
+
+def _table_exists(conn, table):
+    """Check if a table exists in the database."""
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        return row is not None
+    except sqlite3.OperationalError:
+        return False
+
+
+def clear_col_cache():
+    """Clear the column cache (call after re-sync)."""
+    _TABLE_COLS.clear()
 
 
 def get_conn():
@@ -28,16 +58,22 @@ PL_EXPENSE_ROOTS = ["Purchase Accounts", "Direct Expenses", "Indirect Expenses"]
 
 def get_all_groups_under(conn, root_groups):
     """Get all group names that fall under any of the root groups (recursive)."""
+    if not _table_exists(conn, "mst_group"):
+        return set(root_groups)
+
     all_groups = set()
     queue = list(root_groups)
     while queue:
         parent = queue.pop(0)
         all_groups.add(parent)
-        children = conn.execute(
-            "SELECT NAME FROM mst_group WHERE PARENT = ?", (parent,)
-        ).fetchall()
+        try:
+            children = conn.execute(
+                "SELECT NAME FROM mst_group WHERE PARENT = ?", (parent,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            children = []
         for (child,) in children:
-            if child not in all_groups:
+            if child and child not in all_groups:
                 queue.append(child)
     return all_groups
 
@@ -52,6 +88,10 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=Non
     if not group_names:
         return {}
 
+    lcols = _get_cols(conn, "mst_ledger")
+    has_ob = "OPENINGBALANCE" in lcols
+    has_cb = "CLOSINGBALANCE" in lcols
+
     placeholders = ",".join(["?"] * len(group_names))
 
     if date_from or date_to:
@@ -63,9 +103,10 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=Non
         if date_to:
             date_cond += " AND v.DATE <= ?"
             date_params.append(date_to)
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
         sql = f"""
         SELECT l.PARENT, l.NAME,
-               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE({ob_expr}, 0) +
                COALESCE((
                    SELECT SUM(CAST(a.AMOUNT AS REAL))
                    FROM trn_accounting a
@@ -76,12 +117,15 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=Non
         WHERE l.PARENT IN ({placeholders})
         ORDER BY l.PARENT, l.NAME
         """
-        rows = conn.execute(sql, date_params + list(group_names)).fetchall()
+        try:
+            rows = conn.execute(sql, date_params + list(group_names)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
     elif as_of_date:
-        # Calculate from opening balance + sum of transactions
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
         sql = f"""
         SELECT l.PARENT, l.NAME,
-               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE({ob_expr}, 0) +
                COALESCE((
                    SELECT SUM(CAST(a.AMOUNT AS REAL))
                    FROM trn_accounting a
@@ -92,15 +136,40 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=Non
         WHERE l.PARENT IN ({placeholders})
         ORDER BY l.PARENT, l.NAME
         """
-        rows = conn.execute(sql, [as_of_date] + list(group_names)).fetchall()
-    else:
+        try:
+            rows = conn.execute(sql, [as_of_date] + list(group_names)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    elif has_cb:
         sql = f"""
         SELECT PARENT, NAME, CAST(CLOSINGBALANCE AS REAL) as balance
         FROM mst_ledger
         WHERE PARENT IN ({placeholders})
         ORDER BY PARENT, NAME
         """
-        rows = conn.execute(sql, list(group_names)).fetchall()
+        try:
+            rows = conn.execute(sql, list(group_names)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    else:
+        # No closing balance column — compute from opening + all transactions
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
+        sql = f"""
+        SELECT l.PARENT, l.NAME,
+               COALESCE({ob_expr}, 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   WHERE a.LEDGERNAME = l.NAME
+               ), 0) as balance
+        FROM mst_ledger l
+        WHERE l.PARENT IN ({placeholders})
+        ORDER BY l.PARENT, l.NAME
+        """
+        try:
+            rows = conn.execute(sql, list(group_names)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
 
     result = {}
     for parent, name, balance in rows:
@@ -115,6 +184,10 @@ def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=Non
 def trial_balance(conn, as_of_date=None, date_from=None, date_to=None):
     """Generate Trial Balance: all ledgers with their closing balances.
     Returns list of (group, ledger, debit, credit)."""
+    lcols = _get_cols(conn, "mst_ledger")
+    has_ob = "OPENINGBALANCE" in lcols
+    has_cb = "CLOSINGBALANCE" in lcols
+
     if date_from or date_to:
         date_cond = ""
         params = []
@@ -124,9 +197,10 @@ def trial_balance(conn, as_of_date=None, date_from=None, date_to=None):
         if date_to:
             date_cond += " AND v.DATE <= ?"
             params.append(date_to)
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
         sql = f"""
         SELECT l.PARENT, l.NAME,
-               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE({ob_expr}, 0) +
                COALESCE((
                    SELECT SUM(CAST(a.AMOUNT AS REAL))
                    FROM trn_accounting a
@@ -136,11 +210,15 @@ def trial_balance(conn, as_of_date=None, date_from=None, date_to=None):
         FROM mst_ledger l
         ORDER BY l.PARENT, l.NAME
         """
-        rows = conn.execute(sql, params).fetchall()
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
     elif as_of_date:
-        sql = """
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
+        sql = f"""
         SELECT l.PARENT, l.NAME,
-               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE({ob_expr}, 0) +
                COALESCE((
                    SELECT SUM(CAST(a.AMOUNT AS REAL))
                    FROM trn_accounting a
@@ -150,23 +228,44 @@ def trial_balance(conn, as_of_date=None, date_from=None, date_to=None):
         FROM mst_ledger l
         ORDER BY l.PARENT, l.NAME
         """
-        rows = conn.execute(sql, [as_of_date]).fetchall()
-    else:
+        try:
+            rows = conn.execute(sql, [as_of_date]).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    elif has_cb:
         sql = """
         SELECT PARENT, NAME, CAST(CLOSINGBALANCE AS REAL) as balance
         FROM mst_ledger
         ORDER BY PARENT, NAME
         """
-        rows = conn.execute(sql).fetchall()
+        try:
+            rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    else:
+        # No closing balance — compute from opening + all transactions
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
+        sql = f"""
+        SELECT l.PARENT, l.NAME,
+               COALESCE({ob_expr}, 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   WHERE a.LEDGERNAME = l.NAME
+               ), 0) as balance
+        FROM mst_ledger l
+        ORDER BY l.PARENT, l.NAME
+        """
+        try:
+            rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
 
     result = []
     for group, name, balance in rows:
         bal = balance or 0.0
         if bal == 0:
             continue
-        # In Tally: negative closing balance = debit balance for liabilities/income
-        # positive closing balance = debit balance for assets/expenses
-        # We need to determine debit/credit based on the amount sign
         debit = abs(bal) if bal < 0 else 0.0
         credit = abs(bal) if bal > 0 else 0.0
         result.append((group, name, debit, credit))
@@ -232,7 +331,6 @@ def profit_and_loss(conn, from_date=None, to_date=None,
             """
             params = list(group_names) + [from_date, to_date] + extra_params
         elif voucher_types:
-            # Need voucher join even without date filter
             sql = f"""
             SELECT l.PARENT, a.LEDGERNAME, SUM(CAST(a.AMOUNT AS REAL)) as total
             FROM trn_accounting a
@@ -256,7 +354,11 @@ def profit_and_loss(conn, from_date=None, to_date=None,
             """
             params = list(group_names)
 
-        rows = conn.execute(sql, params).fetchall()
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
         result = {}
         for parent, ledger, total in rows:
             if parent not in result:
@@ -268,7 +370,6 @@ def profit_and_loss(conn, from_date=None, to_date=None,
     expense = get_pl_amounts(expense_groups)
 
     # Calculate totals
-    # Income amounts are positive (credit), expenses are positive (debit)
     total_income = sum(abs(amt) for entries in income.values() for _, amt in entries)
     total_expense = sum(abs(amt) for entries in expense.values() for _, amt in entries)
 
@@ -313,7 +414,6 @@ def balance_sheet(conn, as_of_date=None, date_from=None, date_to=None):
     assets = {g: e for g, e in assets.items() if e}
     liabilities = {g: e for g, e in liabilities.items() if e}
 
-    # Assets: negative closing balance in Tally = debit balance = asset
     total_assets = sum(abs(bal) for entries in assets.values() for _, bal in entries)
     total_liabilities = sum(abs(bal) for entries in liabilities.values() for _, bal in entries)
 
@@ -331,17 +431,27 @@ def ledger_detail(conn, ledger_name, from_date=None, to_date=None,
                   voucher_types=None):
     """Get all transactions for a specific ledger with running balance.
     Returns: (opening_balance, transactions_list, closing_balance)
-    Each transaction: (date, vch_type, vch_number, narration, debit, credit, balance)
+    Each transaction: dict with date, voucher_type, voucher_number, narration, party, debit, credit, balance
 
     Optional filters:
         voucher_types: list of voucher type names to include
     """
+    lcols = _get_cols(conn, "mst_ledger")
+    vcols = _get_cols(conn, "trn_voucher")
+    has_ob = "OPENINGBALANCE" in lcols
+    has_narration = "NARRATION" in vcols
+
     # Opening balance
-    ob = conn.execute(
-        "SELECT CAST(OPENINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = ?",
-        (ledger_name,)
-    ).fetchone()
-    opening = ob[0] if ob and ob[0] else 0.0
+    opening = 0.0
+    if has_ob:
+        try:
+            ob = conn.execute(
+                "SELECT CAST(OPENINGBALANCE AS REAL) FROM mst_ledger WHERE NAME = ?",
+                (ledger_name,)
+            ).fetchone()
+            opening = (ob[0] or 0.0) if ob else 0.0
+        except sqlite3.OperationalError:
+            opening = 0.0
 
     # Transactions
     date_filter = ""
@@ -357,15 +467,19 @@ def ledger_detail(conn, ledger_name, from_date=None, to_date=None,
         date_filter += f" AND v.VOUCHERTYPENAME IN ({vt_ph})"
         params.extend(voucher_types)
 
+    narration_col = "v.NARRATION" if has_narration else "'' AS NARRATION"
     sql = f"""
-    SELECT v.DATE, v.VOUCHERTYPENAME, v.VOUCHERNUMBER, v.NARRATION,
+    SELECT v.DATE, v.VOUCHERTYPENAME, v.VOUCHERNUMBER, {narration_col},
            CAST(a.AMOUNT AS REAL), v.PARTYLEDGERNAME
     FROM trn_accounting a
     JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
     WHERE a.LEDGERNAME = ?{date_filter}
     ORDER BY v.DATE, v.VOUCHERNUMBER
     """
-    rows = conn.execute(sql, params).fetchall()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
 
     transactions = []
     running = opening
@@ -399,7 +513,12 @@ def pl_group_drilldown(conn, group_name, from_date=None, to_date=None,
         voucher_types: list of voucher type names to include
     """
     all_groups = get_all_groups_under(conn, [group_name])
+    if not all_groups:
+        return []
     placeholders = ",".join(["?"] * len(all_groups))
+
+    vcols = _get_cols(conn, "trn_voucher")
+    narration_col = "v.NARRATION" if "NARRATION" in vcols else "'' AS NARRATION"
 
     date_filter = ""
     params = list(all_groups)
@@ -416,14 +535,17 @@ def pl_group_drilldown(conn, group_name, from_date=None, to_date=None,
 
     sql = f"""
     SELECT v.DATE, v.VOUCHERTYPENAME, v.VOUCHERNUMBER, a.LEDGERNAME,
-           v.PARTYLEDGERNAME, CAST(a.AMOUNT AS REAL), v.NARRATION
+           v.PARTYLEDGERNAME, CAST(a.AMOUNT AS REAL), {narration_col}
     FROM trn_accounting a
     JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
     JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
     WHERE l.PARENT IN ({placeholders}){date_filter}
     ORDER BY v.DATE, v.VOUCHERNUMBER
     """
-    rows = conn.execute(sql, params).fetchall()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
     return [{
         "date": r[0], "voucher_type": r[1], "voucher_number": r[2],
@@ -437,6 +559,10 @@ def debtor_aging(conn, date_from=None, date_to=None):
     """Simple debtor aging based on closing balances from mst_ledger.
     Groups: Sundry Debtors.
     When date_from/date_to provided, computes opening + transactions in range."""
+    lcols = _get_cols(conn, "mst_ledger")
+    has_ob = "OPENINGBALANCE" in lcols
+    has_cb = "CLOSINGBALANCE" in lcols
+
     if date_from or date_to:
         date_cond = ""
         params = []
@@ -446,9 +572,10 @@ def debtor_aging(conn, date_from=None, date_to=None):
         if date_to:
             date_cond += " AND v.DATE <= ?"
             params.append(date_to)
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
         sql = f"""
         SELECT l.NAME,
-               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE({ob_expr}, 0) +
                COALESCE((
                    SELECT SUM(CAST(a.AMOUNT AS REAL))
                    FROM trn_accounting a
@@ -459,8 +586,11 @@ def debtor_aging(conn, date_from=None, date_to=None):
         WHERE l.PARENT = 'Sundry Debtors'
         ORDER BY balance
         """
-        rows = conn.execute(sql, params).fetchall()
-    else:
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    elif has_cb:
         sql = """
         SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
         FROM mst_ledger
@@ -468,13 +598,40 @@ def debtor_aging(conn, date_from=None, date_to=None):
           AND CAST(CLOSINGBALANCE AS REAL) != 0
         ORDER BY CAST(CLOSINGBALANCE AS REAL)
         """
-        rows = conn.execute(sql).fetchall()
+        try:
+            rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    else:
+        # No closing balance — compute from opening + all transactions
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
+        sql = f"""
+        SELECT l.NAME,
+               COALESCE({ob_expr}, 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   WHERE a.LEDGERNAME = l.NAME
+               ), 0) as balance
+        FROM mst_ledger l
+        WHERE l.PARENT = 'Sundry Debtors'
+        ORDER BY balance
+        """
+        try:
+            rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
     return [(name, abs(bal)) for name, bal in rows if bal and bal != 0]
 
 
 def creditor_aging(conn, date_from=None, date_to=None):
     """Simple creditor listing based on closing balances.
     When date_from/date_to provided, computes opening + transactions in range."""
+    lcols = _get_cols(conn, "mst_ledger")
+    has_ob = "OPENINGBALANCE" in lcols
+    has_cb = "CLOSINGBALANCE" in lcols
+
     if date_from or date_to:
         date_cond = ""
         params = []
@@ -484,9 +641,10 @@ def creditor_aging(conn, date_from=None, date_to=None):
         if date_to:
             date_cond += " AND v.DATE <= ?"
             params.append(date_to)
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
         sql = f"""
         SELECT l.NAME,
-               COALESCE(CAST(l.OPENINGBALANCE AS REAL), 0) +
+               COALESCE({ob_expr}, 0) +
                COALESCE((
                    SELECT SUM(CAST(a.AMOUNT AS REAL))
                    FROM trn_accounting a
@@ -497,8 +655,11 @@ def creditor_aging(conn, date_from=None, date_to=None):
         WHERE l.PARENT = 'Sundry Creditors'
         ORDER BY balance
         """
-        rows = conn.execute(sql, params).fetchall()
-    else:
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    elif has_cb:
         sql = """
         SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
         FROM mst_ledger
@@ -506,7 +667,29 @@ def creditor_aging(conn, date_from=None, date_to=None):
           AND CAST(CLOSINGBALANCE AS REAL) != 0
         ORDER BY CAST(CLOSINGBALANCE AS REAL)
         """
-        rows = conn.execute(sql).fetchall()
+        try:
+            rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    else:
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
+        sql = f"""
+        SELECT l.NAME,
+               COALESCE({ob_expr}, 0) +
+               COALESCE((
+                   SELECT SUM(CAST(a.AMOUNT AS REAL))
+                   FROM trn_accounting a
+                   WHERE a.LEDGERNAME = l.NAME
+               ), 0) as balance
+        FROM mst_ledger l
+        WHERE l.PARENT = 'Sundry Creditors'
+        ORDER BY balance
+        """
+        try:
+            rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+
     return [(name, abs(bal)) for name, bal in rows if bal and bal != 0]
 
 
@@ -545,7 +728,10 @@ def voucher_summary(conn, from_date=None, to_date=None, voucher_types=None):
     GROUP BY VOUCHERTYPENAME
     ORDER BY count DESC
     """
-    return conn.execute(sql, params).fetchall()
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
 
 # ── STOCK / INVENTORY SUMMARY ─────────────────────────────────────────────────
@@ -553,22 +739,39 @@ def voucher_summary(conn, from_date=None, to_date=None, voucher_types=None):
 def stock_summary(conn):
     """Return stock item summary if mst_stock_item table has data.
     Returns list of dicts or empty list if no stock data."""
+    if not _table_exists(conn, "mst_stock_item"):
+        return []
+
+    sicols = _get_cols(conn, "mst_stock_item")
+    has_cv = "CLOSINGVALUE" in sicols
+    has_cb = "CLOSINGBALANCE" in sicols
+
     try:
-        rows = conn.execute("""
-            SELECT NAME, PARENT,
-                   CAST(CLOSINGBALANCE AS REAL) as closing_qty,
-                   CAST(CLOSINGVALUE AS REAL) as closing_val
-            FROM mst_stock_item
-            WHERE CAST(CLOSINGVALUE AS REAL) != 0
-            ORDER BY ABS(CAST(CLOSINGVALUE AS REAL)) DESC
-            LIMIT 50
-        """).fetchall()
-        return [{"name": r[0], "group": r[1],
-                 "closing_qty": r[2] or 0, "closing_value": r[3] or 0}
-                for r in rows]
-    except Exception:
-        # Table may not exist or have different columns
-        try:
+        if has_cv:
+            rows = conn.execute("""
+                SELECT NAME, PARENT,
+                       CAST(CLOSINGBALANCE AS REAL) as closing_qty,
+                       CAST(CLOSINGVALUE AS REAL) as closing_val
+                FROM mst_stock_item
+                WHERE CAST(CLOSINGVALUE AS REAL) != 0
+                ORDER BY ABS(CAST(CLOSINGVALUE AS REAL)) DESC
+                LIMIT 50
+            """).fetchall()
+            return [{"name": r[0], "group": r[1],
+                     "closing_qty": r[2] or 0, "closing_value": r[3] or 0}
+                    for r in rows]
+        elif has_cb:
+            rows = conn.execute("""
+                SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as closing_qty
+                FROM mst_stock_item
+                WHERE CAST(CLOSINGBALANCE AS REAL) != 0
+                ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
+                LIMIT 50
+            """).fetchall()
+            return [{"name": r[0], "group": r[1],
+                     "closing_qty": r[2] or 0, "closing_value": 0}
+                    for r in rows]
+        else:
             rows = conn.execute("""
                 SELECT NAME, PARENT
                 FROM mst_stock_item
@@ -578,13 +781,15 @@ def stock_summary(conn):
             return [{"name": r[0], "group": r[1],
                      "closing_qty": 0, "closing_value": 0}
                     for r in rows]
-        except Exception:
-            return []
+    except sqlite3.OperationalError:
+        return []
 
 
 def godown_summary(conn):
     """Return godown summary if mst_godown table has data.
     Returns list of dicts or empty list."""
+    if not _table_exists(conn, "mst_godown"):
+        return []
     try:
         rows = conn.execute("""
             SELECT NAME, PARENT FROM mst_godown
@@ -592,7 +797,7 @@ def godown_summary(conn):
             ORDER BY NAME
         """).fetchall()
         return [{"name": r[0], "parent": r[1]} for r in rows]
-    except Exception:
+    except sqlite3.OperationalError:
         return []
 
 
@@ -600,14 +805,20 @@ def godown_summary(conn):
 
 def search_ledger(conn, query):
     """Search ledgers by name (fuzzy)."""
-    sql = """
-    SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as balance
-    FROM mst_ledger
-    WHERE NAME LIKE ?
-    ORDER BY NAME
-    LIMIT 20
-    """
-    return conn.execute(sql, [f"%{query}%"]).fetchall()
+    lcols = _get_cols(conn, "mst_ledger")
+    has_cb = "CLOSINGBALANCE" in lcols
+    balance_col = "CAST(CLOSINGBALANCE AS REAL)" if has_cb else "0"
+    try:
+        sql = f"""
+        SELECT NAME, PARENT, {balance_col} as balance
+        FROM mst_ledger
+        WHERE NAME LIKE ?
+        ORDER BY NAME
+        LIMIT 20
+        """
+        return conn.execute(sql, [f"%{query}%"]).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
 
 # ── QUICK TEST ───────────────────────────────────────────────────────────────

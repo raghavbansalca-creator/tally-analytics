@@ -11,6 +11,35 @@ from collections import defaultdict
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 
+# ── SHARED DEFENSIVE UTILITIES ────────────────────────────────────────────
+_TABLE_COLS = {}
+
+
+def _get_cols(conn, table):
+    """Return set of column names for a table (cached per session)."""
+    if table not in _TABLE_COLS:
+        try:
+            _TABLE_COLS[table] = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except sqlite3.OperationalError:
+            _TABLE_COLS[table] = set()
+    return _TABLE_COLS[table]
+
+
+def _table_exists(conn, table):
+    """Check if a table exists in the database."""
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        return row is not None
+    except sqlite3.OperationalError:
+        return False
+
+
+def clear_col_cache():
+    """Clear the column cache (call after re-sync)."""
+    _TABLE_COLS.clear()
+
 
 def get_conn():
     return sqlite3.connect(DB_PATH)
@@ -180,14 +209,17 @@ def get_available_months(conn=None):
         conn = get_conn()
         close = True
 
-    rows = conn.execute("""
-        SELECT DISTINCT SUBSTR(v.DATE, 1, 6) as month
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        JOIN mst_ledger l ON l.name = a.LEDGERNAME
-        WHERE UPPER(l.parent) LIKE '%DUTI%' OR UPPER(l.parent) LIKE '%TAX%'
-        ORDER BY month
-    """).fetchall()
+    try:
+        rows = conn.execute("""
+            SELECT DISTINCT SUBSTR(v.DATE, 1, 6) as month
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            JOIN mst_ledger l ON l.name = a.LEDGERNAME
+            WHERE UPPER(l.parent) LIKE '%DUTI%' OR UPPER(l.parent) LIKE '%TAX%'
+            ORDER BY month
+        """).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
 
     if close:
         conn.close()
@@ -218,15 +250,18 @@ def _get_output_gst_voucher_guids(conn, gst, month=None):
         return set()
     placeholders = ",".join(["?"] * len(all_output))
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
-    rows = conn.execute(f"""
-        SELECT DISTINCT v.GUID
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE a.LEDGERNAME IN ({placeholders})
-          AND v.VOUCHERTYPENAME != 'Credit Note'
-          {month_filter}
-    """, all_output).fetchall()
-    return {r[0] for r in rows}
+    try:
+        rows = conn.execute(f"""
+            SELECT DISTINCT v.GUID
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            WHERE a.LEDGERNAME IN ({placeholders})
+              AND v.VOUCHERTYPENAME != 'Credit Note'
+              {month_filter}
+        """, all_output).fetchall()
+        return {r[0] for r in rows}
+    except sqlite3.OperationalError:
+        return set()
 
 
 def gstr1_b2b_invoices(conn, month=None):
@@ -236,22 +271,33 @@ def gstr1_b2b_invoices(conn, month=None):
     gst = _detect_gst_ledgers(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
+    # Check column existence
+    vcols = _get_cols(conn, "trn_voucher")
+    has_partygstin = "PARTYGSTIN" in vcols
+    has_pos = "PLACEOFSUPPLY" in vcols
+
     # Find vouchers with output GST AND party GSTIN
     all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
     if not all_output:
         return []
+    if not has_partygstin:
+        return []  # Cannot identify B2B without PARTYGSTIN column
     placeholders = ",".join(["?"] * len(all_output))
-    vouchers = conn.execute(f"""
-        SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PARTYGSTIN,
-               v.PLACEOFSUPPLY, v.VOUCHERTYPENAME
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE a.LEDGERNAME IN ({placeholders})
-          AND v.VOUCHERTYPENAME != 'Credit Note'
-          AND v.PARTYGSTIN IS NOT NULL AND v.PARTYGSTIN != ''
-          {month_filter}
-        ORDER BY v.DATE, v.VOUCHERNUMBER
-    """, all_output).fetchall()
+    pos_col = "v.PLACEOFSUPPLY" if has_pos else "'' AS PLACEOFSUPPLY"
+    try:
+        vouchers = conn.execute(f"""
+            SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PARTYGSTIN,
+                   {pos_col}, v.VOUCHERTYPENAME
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            WHERE a.LEDGERNAME IN ({placeholders})
+              AND v.VOUCHERTYPENAME != 'Credit Note'
+              AND v.PARTYGSTIN IS NOT NULL AND v.PARTYGSTIN != ''
+              {month_filter}
+            ORDER BY v.DATE, v.VOUCHERNUMBER
+        """, all_output).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
     results = []
     seen_guids = set()
@@ -313,20 +359,29 @@ def gstr1_b2c_invoices(conn, month=None):
     company_state = _get_company_state(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
+    vcols = _get_cols(conn, "trn_voucher")
+    has_partygstin = "PARTYGSTIN" in vcols
+    has_pos = "PLACEOFSUPPLY" in vcols
+
     all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
     if not all_output:
         return []
     placeholders = ",".join(["?"] * len(all_output))
-    vouchers = conn.execute(f"""
-        SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PLACEOFSUPPLY
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE a.LEDGERNAME IN ({placeholders})
-          AND v.VOUCHERTYPENAME != 'Credit Note'
-          AND (v.PARTYGSTIN IS NULL OR v.PARTYGSTIN = '')
-          {month_filter}
-        ORDER BY v.DATE, v.VOUCHERNUMBER
-    """, all_output).fetchall()
+    pos_col = "v.PLACEOFSUPPLY" if has_pos else "'' AS PLACEOFSUPPLY"
+    gstin_filter = "AND (v.PARTYGSTIN IS NULL OR v.PARTYGSTIN = '')" if has_partygstin else ""
+    try:
+        vouchers = conn.execute(f"""
+            SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {pos_col}
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            WHERE a.LEDGERNAME IN ({placeholders})
+              AND v.VOUCHERTYPENAME != 'Credit Note'
+              {gstin_filter}
+              {month_filter}
+            ORDER BY v.DATE, v.VOUCHERNUMBER
+        """, all_output).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
     results = []
     seen_guids = set()
@@ -385,27 +440,37 @@ def gstr1_credit_notes(conn, month=None):
     gst = _detect_gst_ledgers(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
+    vcols = _get_cols(conn, "trn_voucher")
+    gstin_col = "v.PARTYGSTIN" if "PARTYGSTIN" in vcols else "'' AS PARTYGSTIN"
+    pos_col = "v.PLACEOFSUPPLY" if "PLACEOFSUPPLY" in vcols else "'' AS PLACEOFSUPPLY"
+
     all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
     if not all_output:
         # Fallback: just get Credit Note vouchers
-        vouchers = conn.execute(f"""
-            SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PARTYGSTIN, v.PLACEOFSUPPLY
-            FROM trn_voucher v
-            WHERE v.VOUCHERTYPENAME = 'Credit Note'
-              {month_filter}
-            ORDER BY v.DATE, v.VOUCHERNUMBER
-        """).fetchall()
+        try:
+            vouchers = conn.execute(f"""
+                SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
+                FROM trn_voucher v
+                WHERE v.VOUCHERTYPENAME = 'Credit Note'
+                  {month_filter}
+                ORDER BY v.DATE, v.VOUCHERNUMBER
+            """).fetchall()
+        except sqlite3.OperationalError:
+            return []
     else:
         placeholders = ",".join(["?"] * len(all_output))
-        vouchers = conn.execute(f"""
-            SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PARTYGSTIN, v.PLACEOFSUPPLY
-            FROM trn_voucher v
-            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-            WHERE v.VOUCHERTYPENAME = 'Credit Note'
-              AND a.LEDGERNAME IN ({placeholders})
-              {month_filter}
-            ORDER BY v.DATE, v.VOUCHERNUMBER
-        """, all_output).fetchall()
+        try:
+            vouchers = conn.execute(f"""
+                SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
+                FROM trn_voucher v
+                JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+                WHERE v.VOUCHERTYPENAME = 'Credit Note'
+                  AND a.LEDGERNAME IN ({placeholders})
+                  {month_filter}
+                ORDER BY v.DATE, v.VOUCHERNUMBER
+            """, all_output).fetchall()
+        except sqlite3.OperationalError:
+            return []
 
     results = []
     seen_guids = set()
@@ -461,19 +526,32 @@ def gstr1_hsn_summary(conn, month=None):
     gst = _detect_gst_ledgers(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
-    cols = [c[1] for c in conn.execute("PRAGMA table_info(trn_accounting)").fetchall()]
-    if "GSTHSNNAME" not in cols:
+    acct_cols = _get_cols(conn, "trn_accounting")
+    if "GSTHSNNAME" not in acct_cols:
         return []
 
-    rows = conn.execute(f"""
-        SELECT a.GSTHSNNAME, a.LEDGERNAME, SUM(ABS(CAST(a.AMOUNT AS REAL))) as total
-        FROM trn_accounting a
-        JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-        WHERE v.VOUCHERTYPENAME IN ('Sales', 'SALE INVOICE')
-          AND a.GSTHSNNAME IS NOT NULL AND a.GSTHSNNAME != ''
-          {month_filter}
-        GROUP BY a.GSTHSNNAME, a.LEDGERNAME
-    """).fetchall()
+    # Detect sales vouchers dynamically: vouchers containing output GST entries
+    all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
+    if not all_output:
+        return []
+    out_ph = ",".join(["?"] * len(all_output))
+
+    try:
+        rows = conn.execute(f"""
+            SELECT a.GSTHSNNAME, a.LEDGERNAME, SUM(ABS(CAST(a.AMOUNT AS REAL))) as total
+            FROM trn_accounting a
+            JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+            WHERE a.VOUCHER_GUID IN (
+                SELECT DISTINCT a2.VOUCHER_GUID FROM trn_accounting a2
+                WHERE a2.LEDGERNAME IN ({out_ph})
+            )
+              AND v.VOUCHERTYPENAME != 'Credit Note'
+              AND a.GSTHSNNAME IS NOT NULL AND a.GSTHSNNAME != ''
+              {month_filter}
+            GROUP BY a.GSTHSNNAME, a.LEDGERNAME
+        """, all_output).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
 
     hsn_data = defaultdict(lambda: {"taxable": 0, "cgst": 0, "sgst": 0, "igst": 0})
     for hsn, ledger, total in rows:
@@ -508,20 +586,38 @@ def gstr1_monthly_summary(conn):
     """Month-wise summary of all output GST.
     Uses signed amounts across ALL voucher types — this matches Tally's closing
     balances exactly (credit notes are negative, reverse charge nets to zero).
+    Detects sales vouchers dynamically by presence of output GST entries.
     """
     gst = _detect_gst_ledgers(conn)
 
+    # Build set of output GST ledger names for fast lookup
+    all_output_set = set(gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"])
+
     # All entries with signed amounts (Tally convention: positive=credit, negative=debit)
-    all_rows = conn.execute("""
-        SELECT SUBSTR(v.DATE,1,6) as month,
-               a.LEDGERNAME,
-               SUM(CAST(a.AMOUNT AS REAL)) as signed_total,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as abs_total,
-               v.VOUCHERTYPENAME
-        FROM trn_accounting a
-        JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-        GROUP BY month, a.LEDGERNAME, v.VOUCHERTYPENAME
-    """).fetchall()
+    try:
+        all_rows = conn.execute("""
+            SELECT SUBSTR(v.DATE,1,6) as month,
+                   a.LEDGERNAME,
+                   SUM(CAST(a.AMOUNT AS REAL)) as signed_total,
+                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as abs_total,
+                   v.VOUCHERTYPENAME
+            FROM trn_accounting a
+            JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+            GROUP BY month, a.LEDGERNAME, v.VOUCHERTYPENAME
+        """).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    # Identify which voucher types are sales types (contain output GST entries)
+    # and which are credit note types
+    sales_vchtypes = set()
+    cn_vchtypes = set()
+    for month, ledger, signed, absolute, vchtype in all_rows:
+        if ledger in all_output_set and absolute > 0:
+            if vchtype and "credit" in vchtype.lower():
+                cn_vchtypes.add(vchtype)
+            else:
+                sales_vchtypes.add(vchtype)
 
     monthly = defaultdict(lambda: {
         "sales_taxable": 0, "cn_taxable": 0,
@@ -529,8 +625,8 @@ def gstr1_monthly_summary(conn):
     })
 
     for month, ledger, signed, absolute, vchtype in all_rows:
-        is_sales = vchtype in ('Sales', 'SALE INVOICE')
-        is_cn = vchtype == 'Credit Note'
+        is_sales = vchtype in sales_vchtypes
+        is_cn = vchtype in cn_vchtypes
 
         if ledger in gst["sales"]:
             if is_sales:
@@ -585,19 +681,26 @@ def input_tax_invoices(conn, month=None):
     gst = _detect_gst_ledgers(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
+    vcols = _get_cols(conn, "trn_voucher")
+    gstin_col = "v.PARTYGSTIN" if "PARTYGSTIN" in vcols else "'' AS PARTYGSTIN"
+    pos_col = "v.PLACEOFSUPPLY" if "PLACEOFSUPPLY" in vcols else "'' AS PLACEOFSUPPLY"
+
     all_input = gst["input_cgst"] + gst["input_sgst"] + gst["input_igst"]
     if not all_input:
         return []
     placeholders = ",".join(["?"] * len(all_input))
-    vouchers = conn.execute(f"""
-        SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PARTYGSTIN, v.PLACEOFSUPPLY
-        FROM trn_voucher v
-        JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE a.LEDGERNAME IN ({placeholders})
-          AND v.VOUCHERTYPENAME != 'Debit Note'
-          {month_filter}
-        ORDER BY v.DATE, v.VOUCHERNUMBER
-    """, all_input).fetchall()
+    try:
+        vouchers = conn.execute(f"""
+            SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            WHERE a.LEDGERNAME IN ({placeholders})
+              AND v.VOUCHERTYPENAME != 'Debit Note'
+              {month_filter}
+            ORDER BY v.DATE, v.VOUCHERNUMBER
+        """, all_input).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
     results = []
     seen_guids = set()
@@ -655,26 +758,36 @@ def input_tax_debit_notes(conn, month=None):
     gst = _detect_gst_ledgers(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
+    vcols = _get_cols(conn, "trn_voucher")
+    gstin_col = "v.PARTYGSTIN" if "PARTYGSTIN" in vcols else "'' AS PARTYGSTIN"
+    pos_col = "v.PLACEOFSUPPLY" if "PLACEOFSUPPLY" in vcols else "'' AS PLACEOFSUPPLY"
+
     all_input = gst["input_cgst"] + gst["input_sgst"] + gst["input_igst"]
     if not all_input:
-        vouchers = conn.execute(f"""
-            SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PARTYGSTIN, v.PLACEOFSUPPLY
-            FROM trn_voucher v
-            WHERE v.VOUCHERTYPENAME = 'Debit Note'
-              {month_filter}
-            ORDER BY v.DATE, v.VOUCHERNUMBER
-        """).fetchall()
+        try:
+            vouchers = conn.execute(f"""
+                SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
+                FROM trn_voucher v
+                WHERE v.VOUCHERTYPENAME = 'Debit Note'
+                  {month_filter}
+                ORDER BY v.DATE, v.VOUCHERNUMBER
+            """).fetchall()
+        except sqlite3.OperationalError:
+            return []
     else:
         placeholders = ",".join(["?"] * len(all_input))
-        vouchers = conn.execute(f"""
-            SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.PARTYGSTIN, v.PLACEOFSUPPLY
-            FROM trn_voucher v
-            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-            WHERE v.VOUCHERTYPENAME = 'Debit Note'
-              AND a.LEDGERNAME IN ({placeholders})
-              {month_filter}
-            ORDER BY v.DATE, v.VOUCHERNUMBER
-        """, all_input).fetchall()
+        try:
+            vouchers = conn.execute(f"""
+                SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
+                FROM trn_voucher v
+                JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+                WHERE v.VOUCHERTYPENAME = 'Debit Note'
+                  AND a.LEDGERNAME IN ({placeholders})
+                  {month_filter}
+                ORDER BY v.DATE, v.VOUCHERNUMBER
+            """, all_input).fetchall()
+        except sqlite3.OperationalError:
+            return []
 
     results = []
     seen_guids = set()
@@ -726,19 +839,36 @@ def input_tax_debit_notes(conn, month=None):
 def input_tax_monthly_summary(conn):
     """Month-wise summary of input tax credit.
     Uses signed amounts across ALL voucher types to match Tally closing balances.
+    Detects purchase vouchers dynamically by presence of input GST entries.
     """
     gst = _detect_gst_ledgers(conn)
 
-    all_rows = conn.execute("""
-        SELECT SUBSTR(v.DATE,1,6) as month,
-               a.LEDGERNAME,
-               SUM(CAST(a.AMOUNT AS REAL)) as signed_total,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as abs_total,
-               v.VOUCHERTYPENAME
-        FROM trn_accounting a
-        JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-        GROUP BY month, a.LEDGERNAME, v.VOUCHERTYPENAME
-    """).fetchall()
+    # Build set of input GST ledger names for fast lookup
+    all_input_set = set(gst["input_cgst"] + gst["input_sgst"] + gst["input_igst"])
+
+    try:
+        all_rows = conn.execute("""
+            SELECT SUBSTR(v.DATE,1,6) as month,
+                   a.LEDGERNAME,
+                   SUM(CAST(a.AMOUNT AS REAL)) as signed_total,
+                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as abs_total,
+                   v.VOUCHERTYPENAME
+            FROM trn_accounting a
+            JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+            GROUP BY month, a.LEDGERNAME, v.VOUCHERTYPENAME
+        """).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    # Identify purchase and debit note voucher types dynamically
+    purchase_vchtypes = set()
+    dn_vchtypes = set()
+    for month, ledger, signed, absolute, vchtype in all_rows:
+        if ledger in all_input_set and absolute > 0:
+            if vchtype and "debit" in vchtype.lower():
+                dn_vchtypes.add(vchtype)
+            else:
+                purchase_vchtypes.add(vchtype)
 
     monthly = defaultdict(lambda: {
         "purchase_taxable": 0, "dn_taxable": 0,
@@ -746,8 +876,8 @@ def input_tax_monthly_summary(conn):
     })
 
     for month, ledger, signed, absolute, vchtype in all_rows:
-        is_purchase = vchtype == 'Purchase'
-        is_dn = vchtype == 'Debit Note'
+        is_purchase = vchtype in purchase_vchtypes
+        is_dn = vchtype in dn_vchtypes
 
         if ledger in gst["purchases"]:
             if is_purchase:
@@ -917,7 +1047,10 @@ def gstr3b_summary(conn, month=None):
         cn_sgst = 0.0
         cn_igst = 0.0
 
-        rows = conn.execute("SELECT name, CLOSINGBALANCE FROM mst_ledger").fetchall()
+        try:
+            rows = conn.execute("SELECT name, CLOSINGBALANCE FROM mst_ledger").fetchall()
+        except Exception:
+            rows = []
         for name, cb in rows:
             bal = _safe_float(cb)
             if bal == 0:

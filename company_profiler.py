@@ -2,11 +2,17 @@
 Seven Labs Vision — Company Profiler (Layer 1)
 Auto-detects entity type, business nature, industry, and complexity from Tally data.
 Runs after every sync and stores the profile in SQLite.
+
+DEFENSIVE: Handles missing tables, missing columns, very small/large companies.
 """
 
 import sqlite3
 import re
 from collections import Counter
+from defensive_helpers import (
+    table_exists, column_exists, get_table_columns,
+    safe_fetchone, safe_fetchall, safe_float, safe_divide
+)
 
 
 def profile_company(db_path="tally_data.db"):
@@ -14,9 +20,19 @@ def profile_company(db_path="tally_data.db"):
     Analyze the Tally data and return a comprehensive company profile.
     Returns a dict with: entity_type, business_nature, industry, complexity, and detailed signals.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+    except Exception as e:
+        return {
+            "entity_type": "Unknown", "business_nature": "Unknown",
+            "industry": "General", "complexity": "Unknown",
+            "complexity_score": 0, "company_name": "",
+            "gstin": "", "gst_registration_type": "", "state": "",
+            "signals": {}, "features": {}, "stats": {},
+            "recommendations": [], "error": str(e),
+        }
 
     profile = {
         "entity_type": None,          # Proprietorship | Partnership | LLP | Pvt Ltd | Public Ltd | Trust | HUF
@@ -36,32 +52,56 @@ def profile_company(db_path="tally_data.db"):
 
     # ── GET COMPANY BASICS ──
     try:
-        cur.execute("SELECT value FROM _metadata WHERE key='company_name'")
-        row = cur.fetchone()
-        if row:
-            profile["company_name"] = row[0]
-    except:
+        if table_exists(conn, "_metadata"):
+            cur.execute("SELECT value FROM _metadata WHERE key='company_name'")
+            row = cur.fetchone()
+            if row:
+                profile["company_name"] = row[0]
+    except Exception:
         pass
 
     # Get GSTIN and registration type from first voucher
     try:
-        cur.execute("SELECT CMPGSTIN, CMPGSTREGISTRATIONTYPE, CMPGSTSTATE FROM trn_voucher WHERE CMPGSTIN IS NOT NULL AND CMPGSTIN != '' LIMIT 1")
-        row = cur.fetchone()
-        if row:
-            profile["gstin"] = row["CMPGSTIN"] or ""
-            profile["gst_registration_type"] = row["CMPGSTREGISTRATIONTYPE"] or ""
-            profile["state"] = row["CMPGSTSTATE"] or ""
-    except:
+        if table_exists(conn, "trn_voucher"):
+            voucher_cols = get_table_columns(conn, "trn_voucher")
+            gstin_cols = []
+            if "CMPGSTIN" in voucher_cols:
+                gstin_cols.append("CMPGSTIN")
+            if "CMPGSTREGISTRATIONTYPE" in voucher_cols:
+                gstin_cols.append("CMPGSTREGISTRATIONTYPE")
+            if "CMPGSTSTATE" in voucher_cols:
+                gstin_cols.append("CMPGSTSTATE")
+            if gstin_cols:
+                sql = f"SELECT {', '.join(gstin_cols)} FROM trn_voucher WHERE "
+                if "CMPGSTIN" in voucher_cols:
+                    sql += "CMPGSTIN IS NOT NULL AND CMPGSTIN != '' "
+                else:
+                    sql += "1=1 "
+                sql += "LIMIT 1"
+                cur.execute(sql)
+                row = cur.fetchone()
+                if row:
+                    if "CMPGSTIN" in voucher_cols:
+                        profile["gstin"] = (row["CMPGSTIN"] or "") if "CMPGSTIN" in gstin_cols else ""
+                    if "CMPGSTREGISTRATIONTYPE" in voucher_cols:
+                        profile["gst_registration_type"] = (row["CMPGSTREGISTRATIONTYPE"] or "") if "CMPGSTREGISTRATIONTYPE" in gstin_cols else ""
+                    if "CMPGSTSTATE" in voucher_cols:
+                        profile["state"] = (row["CMPGSTSTATE"] or "") if "CMPGSTSTATE" in gstin_cols else ""
+    except Exception:
         pass
 
     # ── VOLUME STATISTICS ──
     stats = {}
-    for table in ["mst_group", "mst_ledger", "mst_stock_item", "mst_godown", "mst_voucher_type", "trn_voucher", "trn_accounting"]:
+    for tbl in ["mst_group", "mst_ledger", "mst_stock_item", "mst_godown", "mst_voucher_type", "trn_voucher", "trn_accounting"]:
         try:
-            cur.execute(f"SELECT COUNT(*) FROM {table}")
-            stats[table] = cur.fetchone()[0]
-        except:
-            stats[table] = 0
+            if table_exists(conn, tbl):
+                cur.execute(f"SELECT COUNT(*) FROM {tbl}")
+                row = cur.fetchone()
+                stats[tbl] = row[0] if row else 0
+            else:
+                stats[tbl] = 0
+        except Exception:
+            stats[tbl] = 0
 
     profile["stats"] = stats
 
@@ -240,31 +280,51 @@ def _detect_business_nature(cur, profile):
     except:
         pass
 
-    # Signal 2: Voucher types — Manufacturing Journal, Job Work, Stock Journal
+    # Signal 2: Voucher types — check ACTUAL USAGE, not just type definitions
+    # (TONOTO has Job Work types defined but never uses them)
     try:
         cur.execute("SELECT NAME, PARENT FROM mst_voucher_type")
         vtypes = [(row["NAME"].upper(), (row["PARENT"] or "").upper()) for row in cur.fetchall()]
         signals["voucher_types"] = [v[0] for v in vtypes]
 
-        mfg_vtypes = [v for v in vtypes if any(kw in v[0] for kw in
-                      ["MANUFACTURING", "PRODUCTION", "JOB WORK", "STOCK JOURNAL"])]
-        if mfg_vtypes:
-            scores["Manufacturing"] += len(mfg_vtypes) * 4
-            signals["manufacturing_voucher_types"] = [v[0] for v in mfg_vtypes]
-
-        # Check for MFGJOURNAL flag in vouchers
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(MFGJOURNAL) = 'YES'")
-        mfg_vch_count = cur.fetchone()[0]
+        # Only count manufacturing if types are ACTUALLY USED in vouchers
+        mfg_vch_count = 0
+        if column_exists(conn, "trn_voucher", "MFGJOURNAL"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(MFGJOURNAL) = 'YES'")
+            row = cur.fetchone()
+            mfg_vch_count = row[0] if row else 0
         if mfg_vch_count > 0:
-            scores["Manufacturing"] += 8
+            scores["Manufacturing"] += 10  # Strong signal — actual manufacturing entries
             signals["manufacturing_voucher_count"] = mfg_vch_count
+
+        # Check if manufacturing voucher types have actual transactions
+        cur.execute("""
+            SELECT VOUCHERTYPENAME, COUNT(*) as cnt FROM trn_voucher
+            WHERE UPPER(VOUCHERTYPENAME) IN ('STOCK JOURNAL', 'MANUFACTURING JOURNAL')
+            GROUP BY VOUCHERTYPENAME
+        """)
+        used_mfg_types = {row[0]: row[1] for row in cur.fetchall()}
+        if used_mfg_types:
+            scores["Manufacturing"] += sum(min(v, 5) for v in used_mfg_types.values())
+            signals["used_manufacturing_types"] = used_mfg_types
+        else:
+            # Types exist but not used — weak signal, just +1
+            mfg_vtypes = [v for v in vtypes if any(kw in v[0] for kw in
+                          ["MANUFACTURING", "PRODUCTION", "JOB WORK", "STOCK JOURNAL"])]
+            if mfg_vtypes:
+                scores["Manufacturing"] += 1  # Weak — defined but unused
+                signals["defined_but_unused_mfg_types"] = [v[0] for v in mfg_vtypes]
     except:
         pass
 
-    # Signal 3: Stock items existence and nature
+    # Signal 3: Stock items — scale score by count (1 item vs 185 items is very different)
     stock_count = profile["stats"].get("mst_stock_item", 0)
-    if stock_count > 0:
-        scores["Trading"] += 5
+    if stock_count > 20:
+        scores["Trading"] += 7  # Strong inventory presence
+        signals["has_stock_items"] = True
+        signals["stock_item_count"] = stock_count
+    elif stock_count > 0:
+        scores["Trading"] += 2  # Minimal inventory
         signals["has_stock_items"] = True
         signals["stock_item_count"] = stock_count
     else:
@@ -300,12 +360,14 @@ def _detect_business_nature(cur, profile):
 
     # Signal 5: ISCOSTCENTRE flag — project/service tracking
     try:
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE) = 'YES'")
-        cost_centre_vch = cur.fetchone()[0]
-        if cost_centre_vch > 0:
-            scores["Service"] += 2
-            signals["cost_centre_vouchers"] = cost_centre_vch
-    except:
+        if column_exists(conn, "trn_voucher", "ISCOSTCENTRE"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE) = 'YES'")
+            row = cur.fetchone()
+            cost_centre_vch = row[0] if row else 0
+            if cost_centre_vch > 0:
+                scores["Service"] += 2
+                signals["cost_centre_vouchers"] = cost_centre_vch
+    except Exception:
         pass
 
     # Determine result
@@ -337,11 +399,17 @@ def _detect_industry(cur, profile):
 
     # ── PHARMA ──
     try:
-        # Check batch tracking / expiry
-        cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
-        batch_items = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISPERISHABLEON)='YES'")
-        perishable_items = cur.fetchone()[0]
+        # Check batch tracking / expiry (columns may not exist in all databases)
+        batch_items = 0
+        perishable_items = 0
+        if column_exists(conn, "mst_stock_item", "ISBATCHWISEON"):
+            cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
+            row = cur.fetchone()
+            batch_items = row[0] if row else 0
+        if column_exists(conn, "mst_stock_item", "ISPERISHABLEON"):
+            cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISPERISHABLEON)='YES'")
+            row = cur.fetchone()
+            perishable_items = row[0] if row else 0
 
         if batch_items > 0:
             scores["Pharma"] += 3
@@ -370,27 +438,46 @@ def _detect_industry(cur, profile):
     except:
         pass
 
-    # ── REAL ESTATE / CONSTRUCTION ──
+    # ── E-COMMERCE / D2C ──
     try:
+        ecom_keywords = ["RAZORPAY", "SHIPROCKET", "SHOPIFY", "AMAZON", "FLIPKART",
+                         "MEESHO", "PAYTM MALL", "INSTAMOJO", "CASHFREE", "PHONEPE",
+                         "DELHIVERY", "ECOM", "COD", "PREPAID ORDER", "MARKETPLACE"]
+        cur.execute("SELECT NAME FROM mst_ledger")
+        all_ledgers = [row[0].upper() for row in cur.fetchall()]
+        ecom_matches = [l for l in all_ledgers if any(kw in l for kw in ecom_keywords)]
+        if ecom_matches:
+            scores["E-commerce/D2C"] += len(ecom_matches) * 2
+            signals["ecommerce_ledgers"] = ecom_matches[:10]
+    except:
+        pass
+
+    # ── REAL ESTATE / CONSTRUCTION ── (tightened — need STRONG signals)
+    try:
+        # Only count strong real estate signals — not generic words like "project" or "site"
         cur.execute("""
             SELECT NAME FROM mst_ledger
-            WHERE UPPER(NAME) LIKE '%PROJECT%' OR UPPER(NAME) LIKE '%CONSTRUCTION%'
-            OR UPPER(NAME) LIKE '%BUILDING%' OR UPPER(NAME) LIKE '%FLAT%'
-            OR UPPER(NAME) LIKE '%PLOT%' OR UPPER(NAME) LIKE '%SITE%'
+            WHERE UPPER(NAME) LIKE '%CONSTRUCTION%'
+            OR UPPER(NAME) LIKE '%BUILDER%'
+            OR UPPER(NAME) LIKE '%FLAT NO%' OR UPPER(NAME) LIKE '%PLOT NO%'
+            OR UPPER(NAME) LIKE '%RERA%'
             OR UPPER(NAME) LIKE '%WIP%CONSTRUCTION%'
+            OR UPPER(NAME) LIKE '%UNDER CONSTRUCTION%'
         """)
         realestate_ledgers = [row[0] for row in cur.fetchall()]
         if realestate_ledgers:
-            scores["Real Estate"] += len(realestate_ledgers) * 2
+            scores["Real Estate"] += len(realestate_ledgers) * 3
             signals["realestate_ledgers"] = realestate_ledgers
 
+        # Strong signal: groups named for construction
         cur.execute("""
             SELECT NAME FROM mst_group
-            WHERE UPPER(NAME) LIKE '%CONSTRUCTION%' OR UPPER(NAME) LIKE '%PROJECT%'
+            WHERE UPPER(NAME) LIKE '%CONSTRUCTION%' OR UPPER(NAME) LIKE '%REAL ESTATE%'
+            OR UPPER(NAME) LIKE '%PROJECTS%WIP%' OR UPPER(NAME) LIKE '%PROPERTY%'
         """)
         re_groups = [row[0] for row in cur.fetchall()]
         if re_groups:
-            scores["Real Estate"] += len(re_groups) * 3
+            scores["Real Estate"] += len(re_groups) * 4
     except:
         pass
 
@@ -415,8 +502,11 @@ def _detect_industry(cur, profile):
 
     # ── TRANSPORT ──
     try:
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(USETRACKINGNUMBER)='YES'")
-        tracking = cur.fetchone()[0]
+        tracking = 0
+        if column_exists(conn, "trn_voucher", "USETRACKINGNUMBER"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(USETRACKINGNUMBER)='YES'")
+            row = cur.fetchone()
+            tracking = row[0] if row else 0
         if tracking > 0:
             scores["Transport"] += 5
             signals["tracking_number_vouchers"] = tracking
@@ -429,9 +519,31 @@ def _detect_industry(cur, profile):
     except:
         pass
 
-    # ── HOSPITAL / HEALTHCARE ──
+    # ── HANDICRAFTS / ARTISAN ──
     try:
-        cur.execute("SELECT NAME FROM mst_ledger WHERE UPPER(NAME) LIKE '%PATIENT%' OR UPPER(NAME) LIKE '%CONSULTATION%' OR UPPER(NAME) LIKE '%OPD%' OR UPPER(NAME) LIKE '%IPD%' OR UPPER(NAME) LIKE '%HOSPITAL%'")
+        craft_keywords = ["HANDICRAFT", "HANDMADE", "ARTISAN", "CRAFT", "KARIGAR",
+                          "EXPORT PROMOTION COUNCIL", "EPCH", "COTTAGE INDUSTRY"]
+        cur.execute("SELECT NAME FROM mst_ledger")
+        all_ldg = [row[0].upper() for row in cur.fetchall()]
+        craft_matches = [l for l in all_ldg if any(kw in l for kw in craft_keywords)]
+        # Also check company name
+        if any(kw in profile.get("company_name", "").upper() for kw in craft_keywords):
+            scores["Handicrafts"] += 6
+            signals["company_name_handicraft"] = True
+        if craft_matches:
+            scores["Handicrafts"] += len(craft_matches) * 2
+            signals["handicraft_ledgers"] = craft_matches[:10]
+    except:
+        pass
+
+    # ── HOSPITAL / HEALTHCARE ── (tightened — "HOSPITALITY" is NOT hospital)
+    try:
+        cur.execute("""SELECT NAME FROM mst_ledger
+            WHERE (UPPER(NAME) LIKE '%PATIENT%' OR UPPER(NAME) LIKE '%CONSULTATION FEE%'
+            OR UPPER(NAME) LIKE '%OPD %' OR UPPER(NAME) LIKE '%IPD %'
+            OR UPPER(NAME) LIKE '%HOSPITAL %' OR UPPER(NAME) LIKE '%CLINIC%')
+            AND UPPER(NAME) NOT LIKE '%HOSPITALITY%'
+        """)
         hospital_ledgers = [row[0] for row in cur.fetchall()]
         if hospital_ledgers:
             scores["Hospital"] += len(hospital_ledgers) * 3
@@ -545,32 +657,38 @@ def _detect_complexity(cur, profile):
 
     # Cost centres used
     try:
-        cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE)='YES'")
-        cc_count = cur.fetchone()[0]
-        if cc_count > 0:
-            score += 1
-            features["cost_centres_used"] = f"{cc_count} vouchers with cost centres"
-    except:
+        if column_exists(conn, "trn_voucher", "ISCOSTCENTRE"):
+            cur.execute("SELECT COUNT(*) FROM trn_voucher WHERE UPPER(ISCOSTCENTRE)='YES'")
+            row = cur.fetchone()
+            cc_count = row[0] if row else 0
+            if cc_count > 0:
+                score += 1
+                features["cost_centres_used"] = f"{cc_count} vouchers with cost centres"
+    except Exception:
         pass
 
     # Batch tracking
     try:
-        cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
-        batch = cur.fetchone()[0]
-        if batch > 0:
-            score += 1
-            features["batch_tracking"] = f"{batch} items with batches"
-    except:
+        if column_exists(conn, "mst_stock_item", "ISBATCHWISEON"):
+            cur.execute("SELECT COUNT(*) FROM mst_stock_item WHERE UPPER(ISBATCHWISEON)='YES'")
+            row = cur.fetchone()
+            batch = row[0] if row else 0
+            if batch > 0:
+                score += 1
+                features["batch_tracking"] = f"{batch} items with batches"
+    except Exception:
         pass
 
     # GST complexity — multiple tax rates
     try:
-        cur.execute("SELECT COUNT(DISTINCT GSTTAXRATE) FROM trn_accounting WHERE GSTTAXRATE IS NOT NULL AND GSTTAXRATE != ''")
-        tax_rates = cur.fetchone()[0]
-        if tax_rates > 3:
-            score += 1
-            features["multi_gst_rates"] = f"{tax_rates} distinct GST rates"
-    except:
+        if column_exists(conn, "trn_accounting", "GSTTAXRATE"):
+            cur.execute("SELECT COUNT(DISTINCT GSTTAXRATE) FROM trn_accounting WHERE GSTTAXRATE IS NOT NULL AND GSTTAXRATE != ''")
+            row = cur.fetchone()
+            tax_rates = row[0] if row else 0
+            if tax_rates > 3:
+                score += 1
+                features["multi_gst_rates"] = f"{tax_rates} distinct GST rates"
+    except Exception:
         pass
 
     # Bank accounts
@@ -668,36 +786,47 @@ def _generate_recommendations(profile):
 def _save_profile(conn, profile):
     """Save the profile to _company_profile table in the database."""
     import json
-    cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS _company_profile")
-    cur.execute("""
-        CREATE TABLE _company_profile (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    for key in ["company_name", "entity_type", "business_nature", "industry",
-                 "complexity", "complexity_score", "gstin", "gst_registration_type", "state"]:
+    try:
+        cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS _company_profile")
+        cur.execute("""
+            CREATE TABLE _company_profile (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        for key in ["company_name", "entity_type", "business_nature", "industry",
+                     "complexity", "complexity_score", "gstin", "gst_registration_type", "state"]:
+            cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                        (key, str(profile.get(key, ""))))
+
+        # Store detailed data as JSON
         cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                    (key, str(profile.get(key, ""))))
+                    ("signals", json.dumps(profile.get("signals", {}), default=str)))
+        cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                    ("features", json.dumps(profile.get("features", {}), default=str)))
+        cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                    ("stats", json.dumps(profile.get("stats", {}), default=str)))
+        cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
+                    ("recommendations", json.dumps(profile.get("recommendations", []), default=str)))
 
-    # Store detailed data as JSON
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("signals", json.dumps(profile.get("signals", {}), default=str)))
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("features", json.dumps(profile.get("features", {}), default=str)))
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("stats", json.dumps(profile.get("stats", {}), default=str)))
-    cur.execute("INSERT INTO _company_profile (key, value) VALUES (?, ?)",
-                ("recommendations", json.dumps(profile.get("recommendations", []), default=str)))
-
-    conn.commit()
+        conn.commit()
+    except Exception as e:
+        # If saving fails (e.g. read-only DB), just log and continue
+        import logging
+        logging.getLogger(__name__).warning(f"Could not save profile to DB: {e}")
 
 
 def load_profile(db_path="tally_data.db"):
     """Load a previously saved profile from the database."""
     import json
-    conn = sqlite3.connect(db_path)
+    import os
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return None
     cur = conn.cursor()
     try:
         cur.execute("SELECT key, value FROM _company_profile")

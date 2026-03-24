@@ -1,5 +1,5 @@
 """
-Seven Labs Vision — Comprehensive Business Analytics Dashboard
+Seven Labs Vision -- Comprehensive Business Analytics Dashboard
 Month-on-month analysis of Sales, Purchases, Expenses, Bank, Cash Flow & Projections.
 Interactive drill-down into invoices, vouchers, parties, and bank statements.
 """
@@ -21,7 +21,12 @@ from analytics import (
 )
 from sidebar_filters import render_sidebar_filters
 
-st.set_page_config(page_title="Business Analytics — SLV", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Business Analytics -- SLV", page_icon="", layout="wide")
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from styles import inject_base_styles, page_header, section_header, metric_card, fmt, fmt_full, badge, footer
+inject_base_styles()
 
 MONTH_LABELS = {
     "202504": "Apr 25", "202505": "May 25", "202506": "Jun 25",
@@ -34,17 +39,35 @@ MONTH_LABELS = {
 def ml(month_code):
     return MONTH_LABELS.get(month_code, month_code)
 
+def _safe_parse_date(date_str, fallback=None):
+    """Safely parse YYYYMMDD date string."""
+    try:
+        if date_str and len(date_str) >= 8:
+            return datetime.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+    except (ValueError, TypeError):
+        pass
+    return fallback
+
+def _safe_div(a, b, default=0):
+    """Safe division -- returns default if b is 0 or None."""
+    if not b:
+        return default
+    return a / b
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
 def fmt_cr(amount):
     if amount is None: return "0"
     return f"{amount/10000000:.2f} Cr" if abs(amount) >= 10000000 else f"{amount/100000:.2f} L"
 
 def fmt_inr(amount):
-    if amount is None: return "₹0"
-    abs_amt = abs(amount)
-    if abs_amt >= 10000000: return f"₹{abs_amt/10000000:.2f} Cr"
-    elif abs_amt >= 100000: return f"₹{abs_amt/100000:.2f} L"
-    elif abs_amt >= 1000: return f"₹{abs_amt:,.0f}"
-    else: return f"₹{abs_amt:.2f}"
+    """Format with rupee symbol using imported fmt."""
+    return f"Rs {fmt(amount)}"
 
 def fmt_date(date_str):
     """Convert YYYYMMDD to DD/MM/YYYY."""
@@ -53,7 +76,7 @@ def fmt_date(date_str):
     return f"{date_str[6:8]}/{date_str[4:6]}/{date_str[:4]}"
 
 
-# ── SESSION STATE FOR DRILL-DOWN NAVIGATION ──────────────────────────────────
+# -- SESSION STATE FOR DRILL-DOWN NAVIGATION ----------------------------------
 
 if "analytics_view" not in st.session_state:
     st.session_state.analytics_view = "main"
@@ -112,50 +135,45 @@ def go_bank_detail(bank_name):
     st.session_state.analytics_drill_bank = bank_name
 
 
-# ── INIT ────────────────────────────────────────────────────────────────────
+# -- INIT ----------------------------------------------------------------------
 
 conn = get_conn()
 company_row = conn.execute("SELECT value FROM _metadata WHERE key='company_name'").fetchone()
 company = company_row[0] if company_row else "Company"
 
-# ── GLOBAL DATE FILTER ──
+# -- GLOBAL DATE FILTER --
 _min_date_row = conn.execute("SELECT MIN(DATE) FROM trn_voucher").fetchone()
 _max_date_row = conn.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
-_min_dt = datetime.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else datetime.date(2025, 4, 1)
-_max_dt = datetime.date(int(_max_date_row[0][:4]), int(_max_date_row[0][4:6]), int(_max_date_row[0][6:8])) if _max_date_row and _max_date_row[0] else datetime.date.today()
-if "applied_start_date" not in st.session_state:
-    st.session_state.applied_start_date = _min_dt
-if "applied_end_date" not in st.session_state:
-    st.session_state.applied_end_date = _max_dt
+_min_dt = _safe_parse_date(_min_date_row[0] if _min_date_row else None, fallback=datetime.date(2025, 4, 1))
+_max_dt = _safe_parse_date(_max_date_row[0] if _max_date_row else None, fallback=datetime.date.today())
+if "global_start_date" not in st.session_state:
+    st.session_state.global_start_date = _min_dt
+if "global_end_date" not in st.session_state:
+    st.session_state.global_end_date = _max_dt
 st.sidebar.markdown("### Date Range")
-_from = st.sidebar.date_input("From", value=st.session_state.applied_start_date, min_value=_min_dt, max_value=_max_dt, key="ba_filter_from")
-_to = st.sidebar.date_input("To", value=st.session_state.applied_end_date, min_value=_min_dt, max_value=_max_dt, key="ba_filter_to")
-_c1, _c2 = st.sidebar.columns(2)
-with _c1:
-    if st.button("Apply", key="ba_apply_dates", use_container_width=True, type="primary"):
-        st.session_state.applied_start_date = _from
-        st.session_state.applied_end_date = _to
-        st.rerun()
-with _c2:
-    if st.button("Reset", key="ba_reset_dates", use_container_width=True):
-        st.session_state.applied_start_date = _min_dt
-        st.session_state.applied_end_date = _max_dt
-        st.rerun()
-DATE_FROM = st.session_state.applied_start_date.strftime("%Y%m%d")
-DATE_TO = st.session_state.applied_end_date.strftime("%Y%m%d")
-st.sidebar.caption(f"Showing: {st.session_state.applied_start_date.strftime('%d %b %Y')} — {st.session_state.applied_end_date.strftime('%d %b %Y')}")
+_from = st.sidebar.date_input("From", value=st.session_state.global_start_date, min_value=_min_dt, max_value=_max_dt, key="ba_filter_from")
+_to = st.sidebar.date_input("To", value=st.session_state.global_end_date, min_value=_min_dt, max_value=_max_dt, key="ba_filter_to")
+st.session_state.global_start_date = _from
+st.session_state.global_end_date = _to
+DATE_FROM = _from.strftime("%Y%m%d")
+DATE_TO = _to.strftime("%Y%m%d")
+st.sidebar.caption(f"Showing: {_from.strftime('%d %b %Y')} to {_to.strftime('%d %b %Y')}")
+if st.sidebar.button("Reset to Full Period", key="ba_reset_dates"):
+    st.session_state.global_start_date = _min_dt
+    st.session_state.global_end_date = _max_dt
+    st.rerun()
 
-# ── DYNAMIC SIDEBAR FILTERS ─────────────────────────────────────────────────
+# -- DYNAMIC SIDEBAR FILTERS --------------------------------------------------
 _filters = render_sidebar_filters(conn, page_key="analytics")
 _vch_types_filter = _filters.get("voucher_types")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # DRILL-DOWN VIEWS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def render_back_button(label="Back to Dashboard", key="back_main"):
-    st.button(f"← {label}", on_click=go_main, key=key, type="primary")
+    st.button(f"<- {label}", on_click=go_main, key=key, type="primary")
 
 
 def render_voucher_detail_view():
@@ -169,10 +187,10 @@ def render_voucher_detail_view():
 
     _guid, date, vch_no, vch_type, party, narration = header
 
-    st.button("← Back", on_click=lambda: st.session_state.update({"analytics_view": st.session_state.get("_prev_view", "main")}),
+    st.button("<- Back", on_click=lambda: st.session_state.update({"analytics_view": st.session_state.get("_prev_view", "main")}),
               key="back_from_voucher", type="primary")
 
-    st.markdown(f"## Voucher Detail — {vch_type} #{vch_no}")
+    section_header(f"Voucher Detail -- {vch_type} #{vch_no}")
     c1, c2, c3 = st.columns(3)
     c1.markdown(f"**Date:** {fmt_date(date)}")
     c2.markdown(f"**Type:** {vch_type}")
@@ -191,10 +209,10 @@ def render_voucher_detail_view():
         for ledger, amount, is_positive in entries:
             abs_amt = abs(amount) if amount else 0
             if is_positive == "Yes":
-                entry_rows.append({"Ledger": ledger, "Debit (₹)": fmt_inr(abs_amt), "Credit (₹)": ""})
+                entry_rows.append({"Ledger": ledger, "Debit (Rs)": fmt_inr(abs_amt), "Credit (Rs)": ""})
                 debit_total += abs_amt
             else:
-                entry_rows.append({"Ledger": ledger, "Debit (₹)": "", "Credit (₹)": fmt_inr(abs_amt)})
+                entry_rows.append({"Ledger": ledger, "Debit (Rs)": "", "Credit (Rs)": fmt_inr(abs_amt)})
                 credit_total += abs_amt
 
         st.dataframe(pd.DataFrame(entry_rows), use_container_width=True, hide_index=True)
@@ -206,7 +224,7 @@ def render_voucher_detail_view():
 
 
 def render_month_detail_view():
-    """Show invoices/vouchers for a month — sales, purchases, receipts, or payments."""
+    """Show invoices/vouchers for a month -- sales, purchases, receipts, or payments."""
     month_code = st.session_state.analytics_drill_month
     drill_type = st.session_state.analytics_drill_type
 
@@ -220,7 +238,7 @@ def render_month_detail_view():
     }
 
     title, param = type_config.get(drill_type, ("Invoices", "Sales Accounts"))
-    st.markdown(f"## {title} — {ml(month_code)}")
+    section_header(f"{title} -- {ml(month_code)}")
 
     if drill_type in ("sales", "purchases"):
         invoices = drill_monthly_invoices(conn, month_code, param)
@@ -233,7 +251,7 @@ def render_month_detail_view():
                 col_a, col_b, col_c, col_d = st.columns([2, 3, 2, 1])
                 col_a.markdown(f"**{fmt_date(date)}**")
                 col_b.markdown(f"{party or 'N/A'}")
-                col_c.markdown(f"#{vch_no} — **{fmt_inr(amount)}**")
+                col_c.markdown(f"#{vch_no} -- **{fmt_inr(amount)}**")
                 col_d.button("View", key=f"vch_{drill_type}_{i}",
                              on_click=go_voucher_detail, args=(guid,))
         else:
@@ -250,7 +268,7 @@ def render_month_detail_view():
                 col_a, col_b, col_c, col_d = st.columns([2, 3, 2, 1])
                 col_a.markdown(f"**{fmt_date(date)}**")
                 col_b.markdown(f"{party or 'N/A'}")
-                col_c.markdown(f"#{vch_no} — **{fmt_inr(amount)}**")
+                col_c.markdown(f"#{vch_no} -- **{fmt_inr(amount)}**")
                 col_d.button("View", key=f"vch_{drill_type}_{i}",
                              on_click=go_voucher_detail, args=(guid,))
         else:
@@ -267,7 +285,7 @@ def render_party_detail_view():
     ledger_parent = "Sales Accounts" if drill_type == "customer" else "Purchase Accounts"
     label = "Customer" if drill_type == "customer" else "Supplier"
 
-    st.markdown(f"## {label} Detail — {party}")
+    section_header(f"{label} Detail -- {party}")
 
     invoices = drill_party_invoices(conn, party, ledger_parent)
     if invoices:
@@ -279,7 +297,7 @@ def render_party_detail_view():
             col_a, col_b, col_c, col_d = st.columns([2, 2, 3, 1])
             col_a.markdown(f"**{fmt_date(date)}**")
             col_b.markdown(f"{vch_type}")
-            col_c.markdown(f"#{vch_no} — **{fmt_inr(amount)}**")
+            col_c.markdown(f"#{vch_no} -- **{fmt_inr(amount)}**")
             col_d.button("View", key=f"party_vch_{i}",
                          on_click=go_voucher_detail, args=(guid,))
     else:
@@ -293,7 +311,7 @@ def render_expense_detail_view():
 
     render_back_button()
 
-    st.markdown(f"## Expense Detail — {ledger}")
+    section_header(f"Expense Detail -- {ledger}")
     st.markdown(f"**Month:** {ml(month_code)}")
 
     txns = drill_expense_transactions(conn, ledger, month_code)
@@ -307,7 +325,7 @@ def render_expense_detail_view():
             col_a.markdown(f"**{fmt_date(date)}**")
             col_b.markdown(f"{vch_type}")
             col_c.markdown(f"{party or 'N/A'}")
-            col_d.markdown(f"#{vch_no} — **{fmt_inr(amount)}**")
+            col_d.markdown(f"#{vch_no} -- **{fmt_inr(amount)}**")
             col_e.button("View", key=f"exp_vch_{i}",
                          on_click=go_voucher_detail, args=(guid,))
     else:
@@ -320,7 +338,7 @@ def render_bank_detail_view():
 
     render_back_button()
 
-    st.markdown(f"## Bank Statement — {bank_name}")
+    section_header(f"Bank Statement -- {bank_name}")
 
     txns = drill_bank_transactions(conn, bank_name)
     if txns:
@@ -346,7 +364,7 @@ def render_bank_detail_view():
         m1, m2, m3 = st.columns(3)
         m1.metric("Total Debits", fmt_inr(total_debit))
         m2.metric("Total Credits", fmt_inr(total_credit))
-        m3.metric(f"Transactions", f"{len(rows)}")
+        m3.metric("Transactions", f"{len(rows)}")
 
         st.markdown("---")
 
@@ -359,63 +377,61 @@ def render_bank_detail_view():
             c4.markdown(f"{row['Party']}")
             c5.markdown(f"{row['Debit']}")
             c6.markdown(f"{row['Credit']}")
-            c7.button("↗", key=f"bank_vch_{i}",
+            c7.button("View", key=f"bank_vch_{i}",
                       on_click=go_voucher_detail, args=(row["_guid"],))
     else:
         st.info(f"No transactions found for {bank_name}.")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # VIEW ROUTER
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 current_view = st.session_state.analytics_view
 
 if current_view == "voucher_detail":
-    st.markdown(f"# 📈 Business Analytics — {company}")
+    page_header(f"Business Analytics -- {company}")
     render_voucher_detail_view()
     conn.close()
     st.stop()
 
 elif current_view == "month_detail":
-    st.markdown(f"# 📈 Business Analytics — {company}")
+    page_header(f"Business Analytics -- {company}")
     render_month_detail_view()
     conn.close()
     st.stop()
 
 elif current_view == "party_detail":
-    st.markdown(f"# 📈 Business Analytics — {company}")
+    page_header(f"Business Analytics -- {company}")
     render_party_detail_view()
     conn.close()
     st.stop()
 
 elif current_view == "expense_detail":
-    st.markdown(f"# 📈 Business Analytics — {company}")
+    page_header(f"Business Analytics -- {company}")
     render_expense_detail_view()
     conn.close()
     st.stop()
 
 elif current_view == "bank_detail":
-    st.markdown(f"# 📈 Business Analytics — {company}")
+    page_header(f"Business Analytics -- {company}")
     render_bank_detail_view()
     conn.close()
     st.stop()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # MAIN DASHBOARD VIEW (unchanged layout, with clickable drill-down buttons)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown(f"# 📈 Business Analytics — {company}")
-st.markdown("**FY 2025-26** (April 2025 — January 2026) | Comprehensive Month-on-Month Analysis")
-st.markdown("---")
+page_header(f"Business Analytics -- {company}", "Comprehensive Month-on-Month Analysis")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 1: EXECUTIVE SUMMARY KPIs
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## Executive Summary")
+section_header("Executive Summary")
 
 pnl = monthly_gross_profit(conn, date_from=DATE_FROM, date_to=DATE_TO,
                            voucher_types=_vch_types_filter)
@@ -432,28 +448,34 @@ total_expenses = sum(m["indirect_expenses"] for m in pnl)
 if len(pnl) >= 2:
     latest = pnl[-1]
     prev = pnl[-2]
-    sales_change = ((latest["sales"] - prev["sales"]) / prev["sales"] * 100) if prev["sales"] else 0
-    gp_change = ((latest["gross_profit"] - prev["gross_profit"]) / abs(prev["gross_profit"]) * 100) if prev["gross_profit"] else 0
+    sales_change = _safe_div(latest["sales"] - prev["sales"], prev["sales"]) * 100
+    gp_change = _safe_div(latest["gross_profit"] - prev["gross_profit"], abs(prev["gross_profit"]) if prev["gross_profit"] else 0) * 100
 else:
     sales_change = gp_change = 0
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Total Revenue", fmt_inr(total_sales), f"{sales_change:+.1f}% MoM")
-k2.metric("Total Purchases", fmt_inr(total_purchases))
-k3.metric("Gross Profit", fmt_inr(total_gp), f"{ratios['gross_profit_margin']:.1f}% margin")
-k4.metric("Net Result", fmt_inr(total_np), "Profit" if total_np >= 0 else "Loss",
-          delta_color="normal" if total_np >= 0 else "inverse")
-k5.metric("Working Capital", fmt_inr(wc["working_capital"]))
-k6.metric("Current Ratio", f"{wc['current_ratio']:.2f}")
+with k1:
+    metric_card("Total Revenue", fmt_inr(total_sales), f"{sales_change:+.1f}% MoM", "green")
+with k2:
+    metric_card("Total Purchases", fmt_inr(total_purchases), "", "red")
+with k3:
+    metric_card("Gross Profit", fmt_inr(total_gp), f"{ratios['gross_profit_margin']:.1f}% margin", "blue")
+with k4:
+    metric_card("Net Result", fmt_inr(total_np), "Profit" if total_np >= 0 else "Loss",
+                "green" if total_np >= 0 else "red")
+with k5:
+    metric_card("Working Capital", fmt_inr(wc["working_capital"]), "", "purple")
+with k6:
+    metric_card("Current Ratio", f"{wc['current_ratio']:.2f}", "", "amber")
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 2: MONTHLY SALES & PURCHASE TREND (Drillable)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 📊 Monthly Sales vs Purchases — Trend Analysis")
+section_header("Monthly Sales vs Purchases -- Trend Analysis")
 st.caption("Click any month to drill into individual invoices")
 
 df_pnl = pd.DataFrame(pnl)
@@ -475,35 +497,35 @@ col1, col2 = st.columns(2)
 with col1:
     st.markdown("### Month-on-Month Sales")
     for i, m in enumerate(pnl):
-        mom_change = ((m["sales"] - pnl[i-1]["sales"]) / pnl[i-1]["sales"] * 100) if i > 0 and pnl[i-1]["sales"] else 0
-        trend = "📈" if mom_change > 0 else ("📉" if mom_change < 0 else "➡️")
+        mom_change = (_safe_div(m["sales"] - pnl[i-1]["sales"], pnl[i-1]["sales"]) * 100) if i > 0 else 0
+        trend = "UP" if mom_change > 0 else ("DOWN" if mom_change < 0 else "--")
         c_month, c_amt, c_chg, c_btn = st.columns([2, 2, 1.5, 1])
         c_month.markdown(f"**{ml(m['month'])}**")
-        c_amt.markdown(f"₹{m['sales']/100000:.2f} L")
+        c_amt.markdown(f"Rs {_safe_div(m['sales'], 100000):.2f} L")
         c_chg.markdown(f"{trend} {mom_change:+.1f}%")
-        c_btn.button("Drill ↗", key=f"drill_sales_{i}",
+        c_btn.button("Drill", key=f"drill_sales_{i}",
                      on_click=go_month_detail, args=(m["month"], "sales"))
 
 with col2:
     st.markdown("### Month-on-Month Purchases")
     for i, m in enumerate(pnl):
-        mom_change = ((m["purchases"] - pnl[i-1]["purchases"]) / pnl[i-1]["purchases"] * 100) if i > 0 and pnl[i-1]["purchases"] else 0
-        trend = "📈" if mom_change > 0 else ("📉" if mom_change < 0 else "➡️")
+        mom_change = (_safe_div(m["purchases"] - pnl[i-1]["purchases"], pnl[i-1]["purchases"]) * 100) if i > 0 else 0
+        trend = "UP" if mom_change > 0 else ("DOWN" if mom_change < 0 else "--")
         c_month, c_amt, c_chg, c_btn = st.columns([2, 2, 1.5, 1])
         c_month.markdown(f"**{ml(m['month'])}**")
-        c_amt.markdown(f"₹{m['purchases']/100000:.2f} L")
+        c_amt.markdown(f"Rs {_safe_div(m['purchases'], 100000):.2f} L")
         c_chg.markdown(f"{trend} {mom_change:+.1f}%")
-        c_btn.button("Drill ↗", key=f"drill_purch_{i}",
+        c_btn.button("Drill", key=f"drill_purch_{i}",
                      on_click=go_month_detail, args=(m["month"], "purchases"))
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 3: PROFITABILITY ANALYSIS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 💰 Profitability — Gross & Net Margin Trends")
+section_header("Profitability -- Gross & Net Margin Trends")
 
 margin_data = df_pnl[["month_label", "gp_margin", "np_margin"]].set_index("month_label")
 margin_data.columns = ["GP Margin %", "NP Margin %"]
@@ -521,18 +543,18 @@ for m in pnl:
         "Expenses": fmt_inr(m["indirect_expenses"]),
         "Net Profit": fmt_inr(m["net_profit"]),
         "NP %": f"{m['np_margin']:.1f}%",
-        "Signal": "✅" if m["net_profit"] > 0 else "⚠️",
+        "Signal": "OK" if m["net_profit"] > 0 else "WARN",
     })
 st.dataframe(pd.DataFrame(profit_rows), use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 4: COLLECTION & PAYMENT EFFICIENCY (Drillable)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 🏦 Cash Collection & Payment Analysis")
+section_header("Cash Collection & Payment Analysis")
 st.caption("Click Receipts/Payments to drill into individual vouchers")
 
 receipts_data, payments_data = monthly_receipts_payments(conn, date_from=DATE_FROM, date_to=DATE_TO)
@@ -559,14 +581,14 @@ with col1:
         r = r_dict.get(m, 0)
         p = p_dict.get(m, 0)
         net = r - p
-        flow_icon = "🟢" if net > 0 else "🔴"
+        flow_label = "+" if net > 0 else "-"
         c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1.5, 1.5, 1.5])
         c1.markdown(f"**{ml(m)}**")
         c2.button(f"R: {fmt_inr(r)}", key=f"drill_rcpt_{idx}",
                   on_click=go_month_detail, args=(m, "receipts"))
         c3.button(f"P: {fmt_inr(p)}", key=f"drill_pymt_{idx}",
                   on_click=go_month_detail, args=(m, "payments"))
-        c4.markdown(f"{flow_icon} {fmt_inr(net)}")
+        c4.markdown(f"{flow_label} {fmt_inr(net)}")
 
 with col2:
     st.markdown("### Collection Efficiency (Receipts / Sales)")
@@ -584,18 +606,18 @@ with col2:
             "Sales": fmt_inr(e["sales"]),
             "Collections": fmt_inr(e["collections"]),
             "Efficiency": f"{e['efficiency']:.0f}%",
-            "Rating": "✅" if e["efficiency"] >= 60 else ("⚠️" if e["efficiency"] >= 40 else "🔴"),
+            "Rating": "OK" if e["efficiency"] >= 60 else ("WARN" if e["efficiency"] >= 40 else "LOW"),
         })
     st.dataframe(pd.DataFrame(eff_rows), use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 5: BANK & CASH POSITION (Drillable)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 🏛️ Bank & Cash Position")
+section_header("Bank & Cash Position")
 st.caption("Click any bank account to view its full statement")
 
 balances = bank_balances(conn, date_from=DATE_FROM, date_to=DATE_TO)
@@ -615,7 +637,7 @@ hdr_c7.markdown("**Action**")
 
 for idx, (name, parent, opening, closing) in enumerate(balances):
     movement = (closing or 0) - (opening or 0)
-    direction = "📈 Inflow" if movement < 0 else "📉 Outflow"
+    direction = "Inflow" if movement < 0 else "Outflow"
     bc1, bc2, bc3, bc4, bc5, bc6, bc7 = st.columns([3, 1.5, 1.5, 1.5, 1.5, 1.5, 1])
     bc1.markdown(f"**{name}**")
     bc2.markdown(f"{parent}")
@@ -623,17 +645,17 @@ for idx, (name, parent, opening, closing) in enumerate(balances):
     bc4.markdown(f"{fmt_inr(abs(closing or 0))}")
     bc5.markdown(f"{fmt_inr(abs(movement))}")
     bc6.markdown(f"{direction}")
-    bc7.button("View ↗", key=f"drill_bank_{idx}",
+    bc7.button("View", key=f"drill_bank_{idx}",
                on_click=go_bank_detail, args=(name,))
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 6: TOP CUSTOMERS & SUPPLIERS (Drillable)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 👥 Customer & Supplier Analysis")
+section_header("Customer & Supplier Analysis")
 st.caption("Click a customer or supplier name to see all their invoices")
 
 col1, col2 = st.columns(2)
@@ -651,8 +673,8 @@ with col1:
             cc1.button(f"{name[:35]}", key=f"drill_cust_{i}",
                        on_click=go_party_detail, args=(name, "customer"))
             cc2.markdown(f"{count} inv")
-            cc3.markdown(f"**{fmt_inr(total)}** ({total/total_sales*100:.1f}%)")
-        st.caption(f"Top 15 contribute {cumulative/total_sales*100:.1f}% of total sales — {'High' if cumulative/total_sales > 0.6 else 'Low'} concentration")
+            cc3.markdown(f"**{fmt_inr(total)}** ({_safe_div(total, total_sales) * 100:.1f}%)")
+        st.caption(f"Top 15 contribute {_safe_div(cumulative, total_sales) * 100:.1f}% of total sales -- {'High' if _safe_div(cumulative, total_sales) > 0.6 else 'Low'} concentration")
 
 with col2:
     st.markdown("### Top 15 Suppliers by Purchases")
@@ -667,17 +689,17 @@ with col2:
             sc1.button(f"{name[:35]}", key=f"drill_supp_{i}",
                        on_click=go_party_detail, args=(name, "supplier"))
             sc2.markdown(f"{count} bills")
-            sc3.markdown(f"**{fmt_inr(total)}** ({total/total_purchases*100:.1f}%)")
-        st.caption(f"Top 15 contribute {cumulative/total_purchases*100:.1f}% of total purchases")
+            sc3.markdown(f"**{fmt_inr(total)}** ({_safe_div(total, total_purchases) * 100:.1f}%)")
+        st.caption(f"Top 15 contribute {_safe_div(cumulative, total_purchases) * 100:.1f}% of total purchases")
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 7: EXPENSE BREAKDOWN (Drillable)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 📋 Indirect Expense Breakdown — Monthly")
+section_header("Indirect Expense Breakdown -- Monthly")
 st.caption("Click an expense head for a specific month to see all underlying transactions")
 
 exp_data = monthly_expenses(conn, date_from=DATE_FROM, date_to=DATE_TO,
@@ -733,11 +755,11 @@ if exp_table:
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 8: WORKING CAPITAL & KEY RATIOS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 📐 Working Capital & Key Financial Ratios")
+section_header("Working Capital & Key Financial Ratios")
 
 col1, col2 = st.columns(2)
 
@@ -757,17 +779,17 @@ with col2:
     st.markdown("### Key Ratios")
     ratio_rows = [
         {"Ratio": "Gross Profit Margin", "Value": f"{ratios['gross_profit_margin']:.1f}%",
-         "Signal": "✅" if ratios["gross_profit_margin"] > 5 else "⚠️"},
+         "Signal": "OK" if ratios["gross_profit_margin"] > 5 else "WARN"},
         {"Ratio": "Net Profit Margin", "Value": f"{ratios['net_profit_margin']:.1f}%",
-         "Signal": "✅" if ratios["net_profit_margin"] > 0 else "🔴"},
+         "Signal": "OK" if ratios["net_profit_margin"] > 0 else "ALERT"},
         {"Ratio": "Current Ratio", "Value": f"{ratios['current_ratio']:.2f}",
-         "Signal": "✅" if ratios["current_ratio"] > 1.5 else ("⚠️" if ratios["current_ratio"] > 1 else "🔴")},
+         "Signal": "OK" if ratios["current_ratio"] > 1.5 else ("WARN" if ratios["current_ratio"] > 1 else "ALERT")},
         {"Ratio": "Debtor Days", "Value": f"{ratios['debtor_days']:.0f} days",
-         "Signal": "✅" if ratios["debtor_days"] < 45 else ("⚠️" if ratios["debtor_days"] < 90 else "🔴")},
+         "Signal": "OK" if ratios["debtor_days"] < 45 else ("WARN" if ratios["debtor_days"] < 90 else "ALERT")},
         {"Ratio": "Creditor Days", "Value": f"{ratios['creditor_days']:.0f} days",
-         "Signal": "✅" if ratios["creditor_days"] < 60 else ("⚠️" if ratios["creditor_days"] < 120 else "🔴")},
+         "Signal": "OK" if ratios["creditor_days"] < 60 else ("WARN" if ratios["creditor_days"] < 120 else "ALERT")},
         {"Ratio": "Return on Assets", "Value": f"{ratios['roa']:.1f}%",
-         "Signal": "✅" if ratios["roa"] > 5 else ("⚠️" if ratios["roa"] > 0 else "🔴")},
+         "Signal": "OK" if ratios["roa"] > 5 else ("WARN" if ratios["roa"] > 0 else "ALERT")},
         {"Ratio": "Total Debtors (Receivable)", "Value": fmt_inr(ratios["total_debtors"]), "Signal": ""},
         {"Ratio": "Total Creditors (Payable)", "Value": fmt_inr(ratios["total_creditors"]), "Signal": ""},
     ]
@@ -785,18 +807,18 @@ with col2:
     if score >= 80:
         st.success("Strong financial health")
     elif score >= 60:
-        st.warning("Moderate — some areas need attention")
+        st.warning("Moderate -- some areas need attention")
     else:
         st.error("Needs immediate attention")
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 9: CASH FLOW STATEMENT + PROJECTIONS (Drillable)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 💸 Cash Flow Statement & Future Projections")
+section_header("Cash Flow Statement & Future Projections")
 st.caption("Click Receipts or Payments in any row to drill down")
 
 cf = cash_flow_statement(conn, date_from=DATE_FROM, date_to=DATE_TO)
@@ -815,8 +837,8 @@ for idx, m in enumerate(cf):
               on_click=go_month_detail, args=(m["month"], "receipts"))
     c4.button(f"P: {fmt_inr(m['payments'])}", key=f"cf_pymt_{idx}",
               on_click=go_month_detail, args=(m["month"], "payments"))
-    flow_icon = "🟢" if m["net_cash_flow"] > 0 else "🔴"
-    c5.markdown(f"{flow_icon} Net: {fmt_inr(m['net_cash_flow'])}")
+    flow_label = "+" if m["net_cash_flow"] > 0 else "-"
+    c5.markdown(f"{flow_label} Net: {fmt_inr(m['net_cash_flow'])}")
     c6.markdown(f"Cum: {fmt_inr(cumulative_cf)}")
 
 # Cash flow chart
@@ -837,7 +859,7 @@ for m in cf:
 st.line_chart(pd.DataFrame(net_cf_chart).set_index("month"), height=250)
 
 
-st.markdown("### 🔮 Projected Cash Flow — Next 3 Months")
+st.markdown("### Projected Cash Flow -- Next 3 Months")
 st.caption("Based on weighted average of last 3 months with trend adjustment")
 
 if projections:
@@ -884,78 +906,79 @@ if projections:
 
     # Risk assessment
     st.markdown("### Cash Flow Risk Assessment")
-    avg_monthly_burn = sum(m["payments"] for m in cf) / len(cf)
+    avg_monthly_burn = _safe_div(sum(m["payments"] for m in cf), len(cf))
     months_of_runway = current_bal / avg_monthly_burn if avg_monthly_burn > 0 else 999
 
     if months_of_runway > 6:
-        st.success(f"Runway: ~{months_of_runway:.1f} months at current burn rate — Comfortable position")
+        st.success(f"Runway: ~{months_of_runway:.1f} months at current burn rate -- Comfortable position")
     elif months_of_runway > 3:
-        st.warning(f"Runway: ~{months_of_runway:.1f} months — Monitor closely")
+        st.warning(f"Runway: ~{months_of_runway:.1f} months -- Monitor closely")
     else:
-        st.error(f"Runway: ~{months_of_runway:.1f} months — Cash crunch risk! Accelerate collections.")
+        st.error(f"Runway: ~{months_of_runway:.1f} months -- Cash crunch risk! Accelerate collections.")
 
 st.markdown("---")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # SECTION 10: INSIGHTS & OBSERVATIONS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-st.markdown("## 🧠 Key Insights & Observations")
+section_header("Key Insights & Observations")
 
 insights = []
 
 # Sales trend
-first_3_avg = sum(m["sales"] for m in pnl[:3]) / 3
-last_3_avg = sum(m["sales"] for m in pnl[-3:]) / 3
-sales_trend_pct = ((last_3_avg - first_3_avg) / first_3_avg * 100)
+first_3_avg = _safe_div(sum(m["sales"] for m in pnl[:3]), min(len(pnl), 3))
+last_3_avg = _safe_div(sum(m["sales"] for m in pnl[-3:]), min(len(pnl), 3))
+sales_trend_pct = _safe_div(last_3_avg - first_3_avg, first_3_avg) * 100
 if sales_trend_pct < -10:
-    insights.append(f"⚠️ **Sales declining**: Average monthly sales dropped {abs(sales_trend_pct):.0f}% from first 3 months ({fmt_inr(first_3_avg)}/month) to last 3 months ({fmt_inr(last_3_avg)}/month)")
+    insights.append(f"WARN **Sales declining**: Average monthly sales dropped {abs(sales_trend_pct):.0f}% from first 3 months ({fmt_inr(first_3_avg)}/month) to last 3 months ({fmt_inr(last_3_avg)}/month)")
 elif sales_trend_pct > 10:
-    insights.append(f"✅ **Sales growing**: Average monthly sales grew {sales_trend_pct:.0f}% from first 3 months to last 3 months")
+    insights.append(f"OK **Sales growing**: Average monthly sales grew {sales_trend_pct:.0f}% from first 3 months to last 3 months")
 
 # Margin trend
-first_3_gp = sum(m["gp_margin"] for m in pnl[:3]) / 3
-last_3_gp = sum(m["gp_margin"] for m in pnl[-3:]) / 3
+first_3_gp = _safe_div(sum(m["gp_margin"] for m in pnl[:3]), min(len(pnl), 3))
+last_3_gp = _safe_div(sum(m["gp_margin"] for m in pnl[-3:]), min(len(pnl), 3))
 if last_3_gp < first_3_gp - 2:
-    insights.append(f"⚠️ **Margin compression**: GP margin declined from {first_3_gp:.1f}% to {last_3_gp:.1f}%")
+    insights.append(f"WARN **Margin compression**: GP margin declined from {first_3_gp:.1f}% to {last_3_gp:.1f}%")
 elif last_3_gp > first_3_gp + 2:
-    insights.append(f"✅ **Margin improvement**: GP margin improved from {first_3_gp:.1f}% to {last_3_gp:.1f}%")
+    insights.append(f"OK **Margin improvement**: GP margin improved from {first_3_gp:.1f}% to {last_3_gp:.1f}%")
 
 # Collection efficiency
-avg_eff = sum(e["efficiency"] for e in eff_data) / len(eff_data) if eff_data else 0
+avg_eff = _safe_div(sum(e["efficiency"] for e in eff_data), len(eff_data)) if eff_data else 0
 if avg_eff < 50:
-    insights.append(f"🔴 **Poor collection efficiency**: Only {avg_eff:.0f}% of sales collected on average — significant credit buildup")
+    insights.append(f"ALERT **Poor collection efficiency**: Only {avg_eff:.0f}% of sales collected on average -- significant credit buildup")
 elif avg_eff < 70:
-    insights.append(f"⚠️ **Moderate collection**: {avg_eff:.0f}% of sales collected — room for improvement")
+    insights.append(f"WARN **Moderate collection**: {avg_eff:.0f}% of sales collected -- room for improvement")
 
 # Creditor concentration
-if suppliers:
-    top1_pct = suppliers[0][2] / total_purchases * 100
+if suppliers and total_purchases:
+    top1_pct = _safe_div(suppliers[0][2], total_purchases) * 100
     if top1_pct > 30:
-        insights.append(f"⚠️ **Supplier concentration risk**: {suppliers[0][0]} accounts for {top1_pct:.0f}% of all purchases")
+        insights.append(f"WARN **Supplier concentration risk**: {suppliers[0][0]} accounts for {top1_pct:.0f}% of all purchases")
 
 # Working capital
 if wc["current_ratio"] < 1:
-    insights.append(f"🔴 **Working capital deficit**: Current ratio {wc['current_ratio']:.2f} — liabilities exceed current assets")
+    insights.append(f"ALERT **Working capital deficit**: Current ratio {wc['current_ratio']:.2f} -- liabilities exceed current assets")
 
 # Debtor days
 if ratios["debtor_days"] > 60:
-    insights.append(f"⚠️ **High debtor days**: {ratios['debtor_days']:.0f} days — push for faster collections")
+    insights.append(f"WARN **High debtor days**: {ratios['debtor_days']:.0f} days -- push for faster collections")
 
 # Net loss months
 loss_months = [m for m in pnl if m["net_profit"] < 0]
 if loss_months:
-    insights.append(f"📉 **Loss-making months**: {len(loss_months)} out of {len(pnl)} months show net loss")
+    insights.append(f"WARN **Loss-making months**: {len(loss_months)} out of {len(pnl)} months show net loss")
 
 # Cash flow pattern
 negative_cf_months = [m for m in cf if m["net_cash_flow"] < 0]
 if len(negative_cf_months) > len(cf) / 2:
-    insights.append(f"🔴 **Negative cash flow**: {len(negative_cf_months)} out of {len(cf)} months had net cash outflow")
+    insights.append(f"ALERT **Negative cash flow**: {len(negative_cf_months)} out of {len(cf)} months had net cash outflow")
 
-# January spike
-if len(pnl) >= 2 and pnl[-1]["purchases"] > pnl[-2]["purchases"] * 1.4:
-    insights.append(f"📦 **Purchase spike in {ml(pnl[-1]['month'])}**: Purchases jumped {((pnl[-1]['purchases']-pnl[-2]['purchases'])/pnl[-2]['purchases']*100):.0f}% — bulk stocking or supplier pressure?")
+# Latest month purchase spike
+if len(pnl) >= 2 and pnl[-2]["purchases"] and pnl[-1]["purchases"] > pnl[-2]["purchases"] * 1.4:
+    _spike_pct = _safe_div(pnl[-1]['purchases'] - pnl[-2]['purchases'], pnl[-2]['purchases']) * 100
+    insights.append(f"NOTE **Purchase spike in {ml(pnl[-1]['month'])}**: Purchases jumped {_spike_pct:.0f}% -- bulk stocking or supplier pressure?")
 
 for insight in insights:
     st.markdown(insight)
@@ -970,13 +993,14 @@ try:
     _company = _co[0] if _co else "Tally"
 except Exception:
     _company = "Tally"
-st.caption(f"Seven Labs Vision — Powered by Tally Data | Generated from {_company} books")
 
-# ── PERSISTENT CHAT BAR ─────────────────────────────────────────────────────
+footer(_company)
+
+# -- PERSISTENT CHAT BAR ------------------------------------------------------
 st.markdown("---")
 from chat_engine import ask, format_result_as_text
 
-chat_input = st.chat_input("Ask anything — P&L, Balance Sheet, ledger of [party], debtors, creditors...")
+chat_input = st.chat_input("Ask anything -- P&L, Balance Sheet, ledger of [party], debtors, creditors...")
 if chat_input:
     result = ask(chat_input)
     st.markdown(f"**You:** {chat_input}")

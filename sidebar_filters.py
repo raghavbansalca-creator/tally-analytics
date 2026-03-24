@@ -2,6 +2,7 @@
 Seven Labs Vision -- Dynamic Sidebar Filters
 Auto-adapts to whatever Tally company is loaded.
 Shows only filters that are relevant to the data present.
+DEFENSIVE: Handles missing tables, columns, empty data gracefully.
 """
 
 import streamlit as st
@@ -9,11 +10,14 @@ import streamlit as st
 
 def _has_table(conn, table_name):
     """Check if a table exists in the database."""
-    row = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-        (table_name,),
-    ).fetchone()
-    return row[0] > 0
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return (row[0] if row else 0) > 0
+    except Exception:
+        return False
 
 
 def _has_column(conn, table_name, column_name):
@@ -35,9 +39,45 @@ def _safe_query(conn, sql, params=None):
         return []
 
 
+def get_company_name(conn):
+    """Get company name from _metadata with fallback."""
+    try:
+        if not _has_table(conn, "_metadata"):
+            return "Company"
+        row = conn.execute(
+            "SELECT value FROM _metadata WHERE key='company_name'"
+        ).fetchone()
+        return row[0] if row else "Company"
+    except Exception:
+        return "Company"
+
+
+def get_date_range(conn):
+    """Derive min/max dates from actual voucher data.
+    Returns (min_date_str, max_date_str) in YYYYMMDD format, or (None, None).
+    DEFENSIVE: Handles empty voucher table, missing DATE column.
+    """
+    try:
+        if not _has_table(conn, "trn_voucher"):
+            return None, None
+        if not _has_column(conn, "trn_voucher", "DATE"):
+            return None, None
+        row = _safe_query(
+            conn,
+            "SELECT MIN(DATE), MAX(DATE) FROM trn_voucher WHERE DATE IS NOT NULL AND DATE != ''",
+        )
+        if row and row[0] and row[0][0] and row[0][1]:
+            return row[0][0], row[0][1]
+        return None, None
+    except Exception:
+        return None, None
+
+
 def render_sidebar_filters(conn, page_key="main"):
     """
     Render dynamic sidebar filters based on what data exists.
+
+    DEFENSIVE: Handles empty voucher table, missing tables/columns gracefully.
 
     Returns a dict with filter selections:
     {
@@ -67,12 +107,14 @@ def render_sidebar_filters(conn, page_key="main"):
     with st.sidebar.expander("Filters", expanded=False):
 
         # ── 1. VOUCHER TYPE FILTER ────────────────────────────────────────
-        _vch_rows = _safe_query(
-            conn,
-            "SELECT DISTINCT VOUCHERTYPENAME FROM trn_voucher "
-            "WHERE VOUCHERTYPENAME IS NOT NULL AND VOUCHERTYPENAME != '' "
-            "ORDER BY VOUCHERTYPENAME",
-        )
+        _vch_rows = []
+        if _has_table(conn, "trn_voucher"):
+            _vch_rows = _safe_query(
+                conn,
+                "SELECT DISTINCT VOUCHERTYPENAME FROM trn_voucher "
+                "WHERE VOUCHERTYPENAME IS NOT NULL AND VOUCHERTYPENAME != '' "
+                "ORDER BY VOUCHERTYPENAME",
+            )
         _vch_type_list = [r[0] for r in _vch_rows if r[0]]
         filters["all_vch_types"] = _vch_type_list
 
@@ -113,11 +155,13 @@ def render_sidebar_filters(conn, page_key="main"):
                 filters["cost_centres"] = selected_cc
 
         # ── 3. LEDGER GROUP FILTER ────────────────────────────────────────
-        _grp_rows = _safe_query(
-            conn,
-            "SELECT DISTINCT parent FROM mst_ledger "
-            "WHERE parent IS NOT NULL AND parent != '' ORDER BY parent",
-        )
+        _grp_rows = []
+        if _has_table(conn, "mst_ledger"):
+            _grp_rows = _safe_query(
+                conn,
+                "SELECT DISTINCT parent FROM mst_ledger "
+                "WHERE parent IS NOT NULL AND parent != '' ORDER BY parent",
+            )
         _group_list = [r[0] for r in _grp_rows if r[0]]
         filters["all_ledger_groups"] = _group_list
 

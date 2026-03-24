@@ -23,15 +23,67 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 
+def _has_table(conn_or_path, table_name):
+    """Check if a table exists. Accepts a connection or path."""
+    try:
+        if isinstance(conn_or_path, str):
+            c = sqlite3.connect(conn_or_path)
+            row = c.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            c.close()
+            return (row[0] if row else 0) > 0
+        else:
+            row = conn_or_path.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            return (row[0] if row else 0) > 0
+    except Exception:
+        return False
+
+
+def _has_column(conn, table_name, column_name):
+    """Check if a column exists in a table."""
+    try:
+        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return any(c[1].upper() == column_name.upper() for c in (cols or []))
+    except Exception:
+        return False
+
+
+def _safe_fetchone(cursor_result):
+    """Safely get fetchone result, returning None on failure."""
+    try:
+        row = cursor_result.fetchone() if cursor_result else None
+        return row
+    except Exception:
+        return None
+
+
+def _safe_fetchall(cursor_result):
+    """Safely get fetchall result, returning [] on failure."""
+    try:
+        rows = cursor_result.fetchall() if cursor_result else []
+        return rows or []
+    except Exception:
+        return []
+
+
 def _get_company_name():
     """Get company name from metadata."""
     try:
         conn = sqlite3.connect(DB_PATH)
+        if not _has_table(conn, '_metadata'):
+            conn.close()
+            return "the company"
         row = conn.execute("SELECT value FROM _metadata WHERE key = 'company_name'").fetchone()
         conn.close()
         return row[0] if row else "the company"
     except Exception:
         return "the company"
+
 USE_LLM = True  # Set to False to force keyword-only mode (skip Gemini)
 
 # ── GEMINI LLM INTEGRATION ───────────────────────────────────────────────────
@@ -157,17 +209,20 @@ def _build_data_context(question):
         # Bank balances
         if any(kw in q for kw in ["bank", "cash", "balance", "money", "fund", "liquid"]):
             try:
-                rows = conn.execute("""
-                    SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as bal
-                    FROM mst_ledger
-                    WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
-                    ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
-                """).fetchall()
-                lines = ["BANK & CASH BALANCES:"]
-                for name, parent, bal in rows:
-                    lines.append(f"  {name} ({parent}): ₹{abs(bal or 0):,.0f}")
-                lines.append(f"  TOTAL: ₹{sum(abs(r[2] or 0) for r in rows):,.0f}")
-                context_parts.append("\n".join(lines))
+                has_closing = _has_column(conn, "mst_ledger", "CLOSINGBALANCE")
+                if has_closing:
+                    rows = conn.execute("""
+                        SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as bal
+                        FROM mst_ledger
+                        WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+                        ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
+                    """).fetchall()
+                    rows = rows or []
+                    lines = ["BANK & CASH BALANCES:"]
+                    for name, parent, bal in rows:
+                        lines.append(f"  {name} ({parent}): ₹{abs(bal or 0):,.0f}")
+                    lines.append(f"  TOTAL: ₹{sum(abs(r[2] or 0) for r in rows):,.0f}")
+                    context_parts.append("\n".join(lines))
             except Exception:
                 pass
 
@@ -712,20 +767,24 @@ def smart_answer(question):
     """
     Comprehensive conversational layer — multi-stage intent understanding system.
 
-    Stage 1: Broad intent classification via flexible patterns (~40+ categories)
-    Stage 2: Entity extraction (party names, months, amounts, ledgers) with fuzzy matching
-    Stage 3: Dynamic SQL generation based on intent + entities
-    Stage 4: Natural language response composition with insights and recommendations
+    DEFENSIVE: All database queries wrapped in try/except. Handles missing
+    tables/columns gracefully. Never crashes on any input.
 
     Returns a conversational response string, or None only as absolute last resort.
     """
-    q = question.lower().strip()
-    q_original = question.strip()
+    try:
+        q = (question or "").lower().strip()
+        q_original = (question or "").strip()
+    except Exception:
+        return None
 
     if not q or len(q) < 2:
         return f"Could you please ask a specific question about your {_get_company_name()} financial data? For example: 'Am I making profit?', 'Who owes me the most?', or 'Show me October sales'."
 
-    conn = get_conn()
+    try:
+        conn = get_conn()
+    except Exception:
+        return "Database is not available. Please ensure a Tally database is loaded."
 
     try:
         # ════════════════════════════════════════════════════════════════
@@ -2098,10 +2157,17 @@ def _ledger_expense_answer(conn, search_term):
 
 
 def execute_action(action_data):
-    """Execute the action determined by the LLM."""
-    conn = get_conn()
+    """Execute the action determined by the LLM.
+    DEFENSIVE: Always returns a valid result dict. Never crashes.
+    """
+    if not action_data or not isinstance(action_data, dict):
+        return {"type": "chat", "message": "Could not determine action.", "explanation": ""}
+    try:
+        conn = get_conn()
+    except Exception:
+        return {"type": "error", "message": "Database connection failed."}
     action = action_data.get("action", "chat")
-    params = action_data.get("params", {})
+    params = action_data.get("params", {}) or {}
     explanation = action_data.get("explanation", "")
 
     try:
@@ -2188,12 +2254,21 @@ def execute_action(action_data):
 
 
 def classify_intent(question):
-    """Local intent classifier — no API needed. Maps natural language to actions."""
-    q = question.lower().strip()
+    """Local intent classifier — no API needed. Maps natural language to actions.
+    DEFENSIVE: Never crashes on any input. Always returns a valid action dict.
+    """
+    try:
+        q = (question or "").lower().strip()
+    except Exception:
+        return _fallback()
+
     if not q:
         return _fallback()
 
-    conn = get_conn()
+    try:
+        conn = get_conn()
+    except Exception:
+        return _fallback()
 
     # ── 1. EXACT PHRASE MATCHES (highest confidence) ────────────────────────
 
@@ -2555,37 +2630,84 @@ def _fallback():
 def ask(question, conversation_history=None):
     """Process a natural language question and return structured results.
 
+    DEFENSIVE: Always returns a valid dict with at minimum {"type": "chat", "message": "..."}.
+    Never crashes on any input.
+
     Flow:
     1. Try Gemini Flash LLM first — real conversational AI (free tier)
     2. If Gemini fails/unavailable, fall back to smart_answer() local engine
     3. If smart_answer returns None, fall back to classify_intent → execute_action
     """
-    # ── STEP 1: Try Gemini Flash (primary brain) ──
-    if USE_LLM:
-        gemini_response = ask_gemini(question, conversation_history)
-        if gemini_response:
-            return {
-                "type": "chat",
-                "message": gemini_response,
-                "raw_action": {"action": "gemini_llm", "question": question},
-                "explanation": "",
-            }
+    # Ensure we always have a string
+    if not isinstance(question, str):
+        question = str(question) if question is not None else ""
 
-    # ── STEP 2: Fall back to local smart_answer ──
-    smart = smart_answer(question)
-    if smart is not None:
+    if not question.strip():
         return {
             "type": "chat",
-            "message": smart,
-            "raw_action": {"action": "smart_answer", "question": question},
+            "message": "Please ask a question about your financial data.",
+            "raw_action": {"action": "empty_question"},
             "explanation": "",
         }
 
-    # ── STEP 3: Fall back to keyword classifier → action executor ──
-    action_data = classify_intent(question)
-    result = execute_action(action_data)
-    result["raw_action"] = action_data
-    return result
+    try:
+        # ── STEP 1: Try Gemini Flash (primary brain) ──
+        if USE_LLM:
+            try:
+                gemini_response = ask_gemini(question, conversation_history)
+                if gemini_response:
+                    return {
+                        "type": "chat",
+                        "message": gemini_response,
+                        "raw_action": {"action": "gemini_llm", "question": question},
+                        "explanation": "",
+                    }
+            except Exception as e:
+                logger.error(f"Gemini fallback triggered: {e}")
+
+        # ── STEP 2: Fall back to local smart_answer ──
+        try:
+            smart = smart_answer(question)
+            if smart is not None:
+                return {
+                    "type": "chat",
+                    "message": smart,
+                    "raw_action": {"action": "smart_answer", "question": question},
+                    "explanation": "",
+                }
+        except Exception as e:
+            logger.error(f"smart_answer fallback triggered: {e}")
+
+        # ── STEP 3: Fall back to keyword classifier → action executor ──
+        try:
+            action_data = classify_intent(question)
+            result = execute_action(action_data)
+            result["raw_action"] = action_data
+            # Ensure result always has required keys
+            if "type" not in result:
+                result["type"] = "chat"
+            if "message" not in result and result["type"] == "chat":
+                result["message"] = result.get("explanation", "I processed your question.")
+            return result
+        except Exception as e:
+            logger.error(f"classify_intent fallback triggered: {e}")
+
+        # Absolute last resort
+        return {
+            "type": "chat",
+            "message": f"I couldn't process that question. Try asking about profit, sales, debtors, or creditors.",
+            "raw_action": {"action": "all_fallback"},
+            "explanation": "",
+        }
+
+    except Exception as e:
+        logger.error(f"ask() fatal error: {e}")
+        return {
+            "type": "chat",
+            "message": "An unexpected error occurred. Please try rephrasing your question.",
+            "raw_action": {"action": "error", "error": str(e)[:200]},
+            "explanation": "",
+        }
 
 
 def format_result_as_text(result):

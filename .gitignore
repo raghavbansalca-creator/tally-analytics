@@ -5,3 +5,4 @@ tally_data.db
 python/
 *.egg-info/
 .streamlit/
+Schedule_III_*.xlsx

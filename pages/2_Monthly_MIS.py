@@ -17,38 +17,63 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sidebar_filters import render_sidebar_filters
 
 # ── PAGE CONFIG ──────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Monthly MIS — SLV", page_icon="📋", layout="wide")
+st.set_page_config(page_title="Monthly MIS — SLV", page_icon="M", layout="wide")
+
+import sys as _sys2, os as _os2
+_sys2.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from styles import inject_base_styles, page_header, section_header, metric_card, fmt, fmt_full, badge, footer
+inject_base_styles()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tally_data.db")
+
+
+def _safe_parse_date(date_str, fallback=None):
+    """Safely parse YYYYMMDD date string."""
+    try:
+        if date_str and len(date_str) >= 8:
+            return datetime.date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]))
+    except (ValueError, TypeError):
+        pass
+    return fallback
+
+
+def _safe_div(a, b, default=0):
+    """Safe division -- returns default if b is 0 or None."""
+    if not b:
+        return default
+    return a / b
+
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
 
 # ── GLOBAL DATE FILTER ──
 _conn_dates = sqlite3.connect(DB_PATH)
 _min_date_row = _conn_dates.execute("SELECT MIN(DATE) FROM trn_voucher").fetchone()
 _max_date_row = _conn_dates.execute("SELECT MAX(DATE) FROM trn_voucher").fetchone()
 _conn_dates.close()
-_min_dt = datetime.date(int(_min_date_row[0][:4]), int(_min_date_row[0][4:6]), int(_min_date_row[0][6:8])) if _min_date_row and _min_date_row[0] else datetime.date(2025, 4, 1)
-_max_dt = datetime.date(int(_max_date_row[0][:4]), int(_max_date_row[0][4:6]), int(_max_date_row[0][6:8])) if _max_date_row and _max_date_row[0] else datetime.date.today()
-if "applied_start_date" not in st.session_state:
-    st.session_state.applied_start_date = _min_dt
-if "applied_end_date" not in st.session_state:
-    st.session_state.applied_end_date = _max_dt
+_min_dt = _safe_parse_date(_min_date_row[0] if _min_date_row else None, fallback=datetime.date(2025, 4, 1))
+_max_dt = _safe_parse_date(_max_date_row[0] if _max_date_row else None, fallback=datetime.date.today())
+if "global_start_date" not in st.session_state:
+    st.session_state.global_start_date = _min_dt
+if "global_end_date" not in st.session_state:
+    st.session_state.global_end_date = _max_dt
 st.sidebar.markdown("### Date Range")
-_from = st.sidebar.date_input("From", value=st.session_state.applied_start_date, min_value=_min_dt, max_value=_max_dt, key="mis_filter_from")
-_to = st.sidebar.date_input("To", value=st.session_state.applied_end_date, min_value=_min_dt, max_value=_max_dt, key="mis_filter_to")
-_c1, _c2 = st.sidebar.columns(2)
-with _c1:
-    if st.button("Apply", key="mis_apply_dates", use_container_width=True, type="primary"):
-        st.session_state.applied_start_date = _from
-        st.session_state.applied_end_date = _to
-        st.rerun()
-with _c2:
-    if st.button("Reset", key="mis_reset_dates", use_container_width=True):
-        st.session_state.applied_start_date = _min_dt
-        st.session_state.applied_end_date = _max_dt
-        st.rerun()
-DATE_FROM = st.session_state.applied_start_date.strftime("%Y%m%d")
-DATE_TO = st.session_state.applied_end_date.strftime("%Y%m%d")
-st.sidebar.caption(f"Showing: {st.session_state.applied_start_date.strftime('%d %b %Y')} — {st.session_state.applied_end_date.strftime('%d %b %Y')}")
+_from = st.sidebar.date_input("From", value=st.session_state.global_start_date, min_value=_min_dt, max_value=_max_dt, key="mis_filter_from")
+_to = st.sidebar.date_input("To", value=st.session_state.global_end_date, min_value=_min_dt, max_value=_max_dt, key="mis_filter_to")
+st.session_state.global_start_date = _from
+st.session_state.global_end_date = _to
+DATE_FROM = _from.strftime("%Y%m%d")
+DATE_TO = _to.strftime("%Y%m%d")
+st.sidebar.caption(f"Showing: {_from.strftime('%d %b %Y')} to {_to.strftime('%d %b %Y')}")
+if st.sidebar.button("Reset to Full Period", key="mis_reset_dates"):
+    st.session_state.global_start_date = _min_dt
+    st.session_state.global_end_date = _max_dt
+    st.rerun()
 
 # ── DYNAMIC SIDEBAR FILTERS ─────────────────────────────────────────────────
 _mis_filter_conn = sqlite3.connect(DB_PATH)
@@ -160,7 +185,7 @@ def sparkline_bar(values, width=80, height=20):
     if not values or all(v == 0 for v in values):
         return ""
     max_val = max(abs(v) for v in values if v != 0)
-    bar_width = width / len(values)
+    bar_width = _safe_div(width, len(values), default=width)
     bars = []
     for i, v in enumerate(values):
         bar_h = abs(v) / max_val * height if max_val > 0 else 0
@@ -433,7 +458,7 @@ def drill_gross_profit(month_code, data):
         rows_data.append(("Less: Direct Expenses", -direct_total))
     rows_data.append(("GROSS PROFIT", gp))
     if sales_amt > 0:
-        rows_data.append(("Gross Margin %", gp / sales_amt * 100))
+        rows_data.append(("Gross Margin %", _safe_div(gp, sales_amt) * 100))
 
     df = pd.DataFrame(rows_data, columns=["Line Item", "Amount"])
     return df
@@ -506,7 +531,7 @@ def build_pnl(data, months):
 
     # Gross Margin %
     pnl["Gross Margin %"] = [
-        (gp[i] / pnl["Revenue (Net Sales)"][i] * 100) if pnl["Revenue (Net Sales)"][i] > 0 else 0
+        _safe_div(gp[i], pnl["Revenue (Net Sales)"][i]) * 100
         for i in range(len(months))
     ]
 
@@ -537,7 +562,7 @@ def build_pnl(data, months):
 
     # Operating Margin %
     pnl["Operating Margin %"] = [
-        (ebitda[i] / pnl["Revenue (Net Sales)"][i] * 100) if pnl["Revenue (Net Sales)"][i] > 0 else 0
+        _safe_div(ebitda[i], pnl["Revenue (Net Sales)"][i]) * 100
         for i in range(len(months))
     ]
 
@@ -617,11 +642,11 @@ def render_drill_view(data, months, pnl, sorted_ledgers):
         st.markdown("**Click below to drill further:**")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button(f"📄 View Sales Invoices ({month_lbl})", key="gp_to_rev"):
+            if st.button(f"View Sales Invoices ({month_lbl})", key="gp_to_rev"):
                 go_drill("revenue", month_code)
                 st.rerun()
         with col2:
-            if st.button(f"📄 View Purchase Bills ({month_lbl})", key="gp_to_purch"):
+            if st.button(f"View Purchase Bills ({month_lbl})", key="gp_to_purch"):
                 go_drill("purchases", month_code)
                 st.rerun()
 
@@ -747,7 +772,7 @@ def render_drill_view(data, months, pnl, sorted_ledgers):
                     st.markdown(f"**Current Month Revenue ({month_lbl}):** {fmt_indian(rev, prefix='₹')}")
                     prev_lbl = month_label(months[idx - 1])
                     st.markdown(f"**Previous Month Revenue ({prev_lbl}):** {fmt_indian(prev_rev, prefix='₹')}")
-                    result = ((rev / prev_rev) - 1) * 100 if prev_rev > 0 else 0
+                    result = (_safe_div(rev, prev_rev) - 1) * 100 if prev_rev > 0 else 0
                     st.markdown(f"### Result: {fmt_pct(result)}")
                 else:
                     st.info("No previous month available for comparison.")
@@ -813,76 +838,6 @@ def main():
         render_drill_view(data, months, pnl, sorted_ledgers)
         return
 
-    # ── HEADER & STYLES ───────────────────────────────────────────────────────
-    st.markdown("""
-    <style>
-    .mis-header {
-        background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
-        padding: 1.5rem 2rem;
-        border-radius: 12px;
-        margin-bottom: 1.5rem;
-    }
-    .mis-header h1 {
-        color: #f8fafc;
-        font-size: 1.8rem;
-        margin: 0 0 0.3rem 0;
-    }
-    .mis-header p {
-        color: #94a3b8;
-        font-size: 0.95rem;
-        margin: 0;
-    }
-    .metric-card {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
-        text-align: center;
-    }
-    .metric-label {
-        font-size: 0.75rem;
-        color: #64748b;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 600;
-    }
-    .metric-value {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #1e293b;
-        margin: 0.2rem 0;
-    }
-    .metric-sub {
-        font-size: 0.8rem;
-        color: #94a3b8;
-    }
-    .metric-green { color: #10b981 !important; }
-    .metric-red { color: #ef4444 !important; }
-    .section-header {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #1e293b;
-        border-bottom: 2px solid #3b82f6;
-        padding-bottom: 0.4rem;
-        margin: 1.5rem 0 1rem 0;
-    }
-    .pnl-table th {
-        background: #1e293b !important;
-        color: #f8fafc !important;
-        font-size: 0.8rem;
-        padding: 8px 12px;
-    }
-    /* Drill buttons inside expander */
-    div[data-testid="stButton"] > button {
-        font-size: 0.72rem;
-        padding: 2px 8px;
-        min-height: 0;
-        height: auto;
-        line-height: 1.4;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
     try:
         _mis_conn = sqlite3.connect(DB_PATH)
         _mis_co = _mis_conn.execute("SELECT value FROM _metadata WHERE key='company_name'").fetchone()
@@ -890,19 +845,14 @@ def main():
         _mis_conn.close()
     except Exception:
         _mis_company = "Company"
-    st.markdown(f"""
-    <div class="mis-header">
-        <h1>{_mis_company} — Monthly MIS</h1>
-        <p>Management Information System &nbsp;|&nbsp; <em>Click any figure to drill down</em></p>
-    </div>
-    """, unsafe_allow_html=True)
+    page_header(f"{_mis_company} -- Monthly MIS", "Management Information System | Click any figure to drill down")
 
     # ── EXECUTIVE SUMMARY ────────────────────────────────────────────────────
     ytd_revenue = sum(pnl["Revenue (Net Sales)"])
     ytd_profit = sum(pnl["NET PROFIT / (LOSS)"])
     ytd_gp = sum(pnl["GROSS PROFIT"])
-    avg_monthly_rev = ytd_revenue / len(months)
-    avg_gp_margin = ytd_gp / ytd_revenue * 100 if ytd_revenue > 0 else 0
+    avg_monthly_rev = _safe_div(ytd_revenue, len(months))
+    avg_gp_margin = _safe_div(ytd_gp, ytd_revenue) * 100
 
     rev_list = pnl["Revenue (Net Sales)"]
     best_month_idx = rev_list.index(max(rev_list))
@@ -920,60 +870,33 @@ def main():
         elif b[1] == "Bank OD A/c":
             cash_balance -= abs(closing)
 
-    avg_monthly_burn = abs(sum(pnl["TOTAL OPERATING EXPENSES"])) / len(months)
-    avg_monthly_net_outflow = abs(ytd_profit / len(months)) if ytd_profit < 0 else 0
-    cash_runway = cash_balance / avg_monthly_net_outflow if avg_monthly_net_outflow > 0 else float('inf')
+    avg_monthly_burn = _safe_div(abs(sum(pnl["TOTAL OPERATING EXPENSES"])), len(months))
+    avg_monthly_net_outflow = _safe_div(abs(ytd_profit), len(months)) if ytd_profit < 0 else 0
+    cash_runway = _safe_div(cash_balance, avg_monthly_net_outflow, default=float('inf'))
 
-    st.markdown('<div class="section-header">EXECUTIVE SUMMARY</div>', unsafe_allow_html=True)
+    section_header("EXECUTIVE SUMMARY")
 
+    profit_color = "green" if ytd_profit >= 0 else "red"
     cols = st.columns(5)
     with cols[0]:
-        profit_color = "metric-green" if ytd_profit >= 0 else "metric-red"
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">YTD Revenue</div>
-            <div class="metric-value">{fmt_lakhs(ytd_revenue)}</div>
-            <div class="metric-sub">{len(months)} months</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("YTD Revenue", fmt_lakhs(ytd_revenue), sub=f"{len(months)} months", color_class="blue")
     with cols[1]:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">YTD Net Profit/Loss</div>
-            <div class="metric-value {profit_color}">{fmt_lakhs(ytd_profit)}</div>
-            <div class="metric-sub">Net Margin: {fmt_pct(ytd_profit / ytd_revenue * 100 if ytd_revenue else 0)}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("YTD Net Profit/Loss", fmt_lakhs(ytd_profit),
+                     sub=f"Net Margin: {fmt_pct(_safe_div(ytd_profit, ytd_revenue) * 100)}",
+                     color_class=profit_color)
     with cols[2]:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Avg Monthly Revenue</div>
-            <div class="metric-value">{fmt_lakhs(avg_monthly_rev)}</div>
-            <div class="metric-sub">GP Margin: {fmt_pct(avg_gp_margin)}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("Avg Monthly Revenue", fmt_lakhs(avg_monthly_rev),
+                     sub=f"GP Margin: {fmt_pct(avg_gp_margin)}")
     with cols[3]:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Best / Worst Month (Rev)</div>
-            <div class="metric-value" style="font-size:1.1rem">{month_labels[best_month_idx]} / {month_labels[worst_month_idx]}</div>
-            <div class="metric-sub">{fmt_lakhs(rev_list[best_month_idx])} / {fmt_lakhs(rev_list[worst_month_idx])}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_card("Best / Worst Month (Rev)",
+                     f"{month_labels[best_month_idx]} / {month_labels[worst_month_idx]}",
+                     sub=f"{fmt_lakhs(rev_list[best_month_idx])} / {fmt_lakhs(rev_list[worst_month_idx])}")
     with cols[4]:
         runway_text = f"{cash_runway:.1f} mo" if cash_runway < 100 else "Profitable"
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Cash Runway</div>
-            <div class="metric-value">{runway_text}</div>
-            <div class="metric-sub">Cash Bal: {fmt_lakhs(cash_balance)}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
+        metric_card("Cash Runway", runway_text, sub=f"Cash Bal: {fmt_lakhs(cash_balance)}")
 
     # ── MONTHLY P&L STATEMENT ────────────────────────────────────────────────
-    st.markdown('<div class="section-header">MONTHLY PROFIT & LOSS STATEMENT</div>', unsafe_allow_html=True)
+    section_header("MONTHLY PROFIT & LOSS STATEMENT")
     st.caption("Click any amount to drill into underlying transactions")
 
     # Build the P&L table as HTML for full control
@@ -1020,15 +943,15 @@ def main():
         return None
 
     # Build HTML table
-    html = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:0.82rem;font-family:monospace;">'
+    html = '<div style="overflow-x:auto;"><table class="slv-table" style="font-family:\'JetBrains Mono\',monospace;">'
 
     # Header row
-    html += '<tr style="background:#1e293b;color:#f8fafc;position:sticky;top:0;">'
-    html += '<th style="text-align:left;padding:10px 12px;min-width:200px;border:1px solid #334155;">Particulars</th>'
+    html += '<tr>'
+    html += '<th style="text-align:left;min-width:200px;">Particulars</th>'
     for ml in month_labels:
-        html += f'<th style="text-align:right;padding:10px 8px;min-width:90px;border:1px solid #334155;">{ml}</th>'
-    html += f'<th style="text-align:right;padding:10px 8px;min-width:100px;border:1px solid #334155;background:#0f172a;">YTD Total</th>'
-    html += f'<th style="text-align:center;padding:10px 8px;min-width:80px;border:1px solid #334155;background:#0f172a;">Trend</th>'
+        html += f'<th style="min-width:90px;">{ml}</th>'
+    html += f'<th style="min-width:100px;">YTD Total</th>'
+    html += f'<th style="text-align:center;min-width:80px;">Trend</th>'
     html += '</tr>'
 
     for row_key in pnl_rows_order:
@@ -1081,7 +1004,7 @@ def main():
         # YTD column
         ytd_val = sum(values)
         if is_pct:
-            ytd_val = sum(values) / len(values) if values else 0
+            ytd_val = _safe_div(sum(values), len(values))
             ytd_cell = fmt_pct(ytd_val)
             ytd_color = "#10b981" if ytd_val > 0 else "#ef4444"
         else:
@@ -1101,7 +1024,7 @@ def main():
 
     # ── DRILL BUTTONS FOR P&L (below the table) ──────────────────────────────
     st.markdown("")
-    with st.expander("🔍 **Drill into P&L Line Items** — Select a line and month to see transactions", expanded=False):
+    with st.expander("**Drill into P&L Line Items** -- Select a line and month to see transactions", expanded=False):
         drill_col1, drill_col2 = st.columns([1, 1])
 
         with drill_col1:
@@ -1130,7 +1053,7 @@ def main():
             selected_month_idx = st.selectbox("Select Month:", month_options,
                                               format_func=lambda i: month_labels[i], key="pnl_drill_month")
 
-        if st.button("📊 View Transactions", key="pnl_drill_go", type="primary"):
+        if st.button("View Transactions", key="pnl_drill_go", type="primary"):
             go_drill(line_keys[selected_line_idx], months[selected_month_idx])
             st.rerun()
 
@@ -1156,7 +1079,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── KEY RATIOS & METRICS ─────────────────────────────────────────────────
-    st.markdown('<div class="section-header">KEY STARTUP / DISTRIBUTION RATIOS</div>', unsafe_allow_html=True)
+    section_header("KEY STARTUP / DISTRIBUTION RATIOS")
 
     col1, col2 = st.columns(2)
 
@@ -1171,12 +1094,12 @@ def main():
             inv_count = data["invoice_counts"].get(m, 1)
             receipts_val = data["receipts"].get(m, 0)
 
-            gp_m = (gp_val / rev * 100) if rev > 0 else 0
-            op_m = (ebitda_val / rev * 100) if rev > 0 else 0
-            np_m = (np_val / rev * 100) if rev > 0 else 0
-            mom_growth = ((rev / pnl["Revenue (Net Sales)"][i - 1]) - 1) * 100 if i > 0 and pnl["Revenue (Net Sales)"][i - 1] > 0 else 0
-            rev_per_inv = rev / inv_count if inv_count > 0 else 0
-            collection_eff = (receipts_val / rev * 100) if rev > 0 else 0
+            gp_m = _safe_div(gp_val, rev) * 100
+            op_m = _safe_div(ebitda_val, rev) * 100
+            np_m = _safe_div(np_val, rev) * 100
+            mom_growth = (_safe_div(rev, pnl["Revenue (Net Sales)"][i - 1]) - 1) * 100 if i > 0 and pnl["Revenue (Net Sales)"][i - 1] > 0 else 0
+            rev_per_inv = _safe_div(rev, inv_count)
+            collection_eff = _safe_div(receipts_val, rev) * 100
 
             ratio_data.append({
                 "Month": month_label(m),
@@ -1193,7 +1116,7 @@ def main():
         st.dataframe(df_ratios, hide_index=True, use_container_width=True)
 
         # Drill buttons for ratios
-        with st.expander("🔍 **Drill into Ratio Calculation**", expanded=False):
+        with st.expander("**Drill into Ratio Calculation**", expanded=False):
             ratio_names = ["Gross Margin", "Op. Margin", "Net Margin", "MoM Growth", "Rev/Invoice", "Collection %"]
             r_col1, r_col2 = st.columns(2)
             with r_col1:
@@ -1201,48 +1124,53 @@ def main():
             with r_col2:
                 sel_ratio_month = st.selectbox("Select Month:", range(len(months)),
                                                format_func=lambda i: month_labels[i], key="ratio_drill_month")
-            if st.button("📊 Show Calculation", key="ratio_drill_go", type="primary"):
+            if st.button("Show Calculation", key="ratio_drill_go", type="primary"):
                 go_drill(f"ratio:{sel_ratio}", months[sel_ratio_month])
                 st.rerun()
 
     with col2:
         # Concentration & Working Capital
-        st.markdown("**Customer Concentration (Top 5)** — click a customer to see invoices")
+        st.markdown("**Customer Concentration (Top 5)** -- click a customer to see invoices")
         total_sales_val = sum(pnl["Revenue (Net Sales)"])
-        top5_total = sum(c[1] for c in data["top5_customers"])
-        conc_pct = (top5_total / total_sales_val * 100) if total_sales_val > 0 else 0
+        _top5 = data.get("top5_customers") or []
 
-        conc_html = '<table style="width:100%;font-size:0.82rem;border-collapse:collapse;">'
-        conc_html += '<tr style="background:#1e293b;color:#f8fafc;"><th style="padding:6px 10px;text-align:left;">Customer</th><th style="padding:6px 10px;text-align:right;">Revenue</th><th style="padding:6px 10px;text-align:right;">% Share</th></tr>'
-        for cust, amt in data["top5_customers"]:
-            share = amt / total_sales_val * 100 if total_sales_val > 0 else 0
-            short_name = cust[:30] + "..." if len(cust) > 30 else cust
-            bar_w = share / conc_pct * 100 if conc_pct > 0 else 0
-            conc_html += f'<tr><td style="padding:5px 10px;border-bottom:1px solid #e2e8f0;font-size:0.78rem;">{short_name}</td>'
-            conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_lakhs(amt)}</td>'
-            conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_pct(share)}</td></tr>'
-        conc_html += f'<tr style="background:#f8fafc;font-weight:700;"><td style="padding:6px 10px;">Top 5 Total</td><td style="padding:6px 10px;text-align:right;">{fmt_lakhs(top5_total)}</td><td style="padding:6px 10px;text-align:right;">{fmt_pct(conc_pct)}</td></tr>'
-        conc_html += '</table>'
-        st.markdown(conc_html, unsafe_allow_html=True)
+        if _top5:
+            top5_total = sum(c[1] for c in _top5)
+            conc_pct = _safe_div(top5_total, total_sales_val) * 100
 
-        # Customer drill buttons
-        cust_cols = st.columns(min(len(data["top5_customers"]), 5))
-        for idx_c, (cust, amt) in enumerate(data["top5_customers"]):
-            short = cust[:18] + ".." if len(cust) > 18 else cust
-            with cust_cols[idx_c]:
-                if st.button(f"📋 {short}", key=f"cust_drill_{idx_c}"):
-                    go_drill("customer", party=cust)
-                    st.rerun()
+            conc_html = '<table class="slv-table">'
+            conc_html += '<tr><th style="text-align:left;">Customer</th><th>Revenue</th><th>% Share</th></tr>'
+            for cust, amt in _top5:
+                share = _safe_div(amt, total_sales_val) * 100
+                short_name = cust[:30] + "..." if len(cust) > 30 else cust
+                conc_html += f'<tr><td style="padding:5px 10px;border-bottom:1px solid #e2e8f0;font-size:0.78rem;">{short_name}</td>'
+                conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_lakhs(amt)}</td>'
+                conc_html += f'<td style="padding:5px 10px;text-align:right;border-bottom:1px solid #e2e8f0;">{fmt_pct(share)}</td></tr>'
+            conc_html += f'<tr style="background:#f8fafc;font-weight:700;"><td style="padding:6px 10px;">Top 5 Total</td><td style="padding:6px 10px;text-align:right;">{fmt_lakhs(top5_total)}</td><td style="padding:6px 10px;text-align:right;">{fmt_pct(conc_pct)}</td></tr>'
+            conc_html += '</table>'
+            st.markdown(conc_html, unsafe_allow_html=True)
+
+            # Customer drill buttons
+            _num_cust_cols = max(min(len(_top5), 5), 1)
+            cust_cols = st.columns(_num_cust_cols)
+            for idx_c, (cust, amt) in enumerate(_top5[:_num_cust_cols]):
+                short = cust[:18] + ".." if len(cust) > 18 else cust
+                with cust_cols[idx_c]:
+                    if st.button(f"{short}", key=f"cust_drill_{idx_c}"):
+                        go_drill("customer", party=cust)
+                        st.rerun()
+        else:
+            st.info("No customer data available for this period.")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         # Working Capital Cycle
         st.markdown("**Working Capital Cycle**")
-        annualized_sales = total_sales_val / len(months) * 12
-        annualized_purchases = sum(pnl["Less: COGS (Purchases)"]) / len(months) * 12
+        annualized_sales = _safe_div(total_sales_val, len(months)) * 12
+        annualized_purchases = _safe_div(sum(pnl["Less: COGS (Purchases)"]), len(months)) * 12
 
-        debtor_days = (data["total_debtors"] / annualized_sales * 365) if annualized_sales > 0 else 0
-        creditor_days = (data["total_creditors"] / annualized_purchases * 365) if annualized_purchases > 0 else 0
+        debtor_days = _safe_div(data.get("total_debtors", 0), annualized_sales) * 365
+        creditor_days = _safe_div(data.get("total_creditors", 0), annualized_purchases) * 365
         wc_cycle = debtor_days - creditor_days
 
         wc_html = f"""
@@ -1261,14 +1189,14 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── CONTRIBUTION MARGIN ANALYSIS ─────────────────────────────────────────
-    st.markdown('<div class="section-header">CONTRIBUTION MARGIN ANALYSIS</div>', unsafe_allow_html=True)
+    section_header("CONTRIBUTION MARGIN ANALYSIS")
 
-    cm_html = '<table style="width:100%;font-size:0.82rem;border-collapse:collapse;font-family:monospace;">'
-    cm_html += '<tr style="background:#1e293b;color:#f8fafc;">'
-    cm_html += '<th style="padding:8px 12px;text-align:left;">Metric</th>'
+    cm_html = '<table class="slv-table" style="font-family:\'JetBrains Mono\',monospace;">'
+    cm_html += '<tr>'
+    cm_html += '<th style="text-align:left;">Metric</th>'
     for ml in month_labels:
-        cm_html += f'<th style="padding:8px 6px;text-align:right;min-width:85px;">{ml}</th>'
-    cm_html += '<th style="padding:8px 8px;text-align:right;background:#0f172a;">YTD</th></tr>'
+        cm_html += f'<th style="min-width:85px;">{ml}</th>'
+    cm_html += '<th>YTD</th></tr>'
 
     # Revenue
     cm_html += '<tr style="background:#ffffff;"><td style="padding:5px 12px;font-weight:600;">Revenue</td>'
@@ -1292,7 +1220,7 @@ def main():
     cm_html += f'<td style="padding:6px 8px;text-align:right;font-weight:700;background:#f8fafc;color:{"#10b981" if ytd_cm >= 0 else "#ef4444"}">{fmt_lakhs(ytd_cm)}</td></tr>'
 
     # CM %
-    cm_pcts = [(cm_values[i] / pnl["Revenue (Net Sales)"][i] * 100) if pnl["Revenue (Net Sales)"][i] > 0 else 0 for i in range(len(months))]
+    cm_pcts = [_safe_div(cm_values[i], pnl["Revenue (Net Sales)"][i]) * 100 for i in range(len(months))]
     cm_html += '<tr style="background:#f8fafc;"><td style="padding:5px 12px;color:#64748b;">Contribution Margin %</td>'
     for v in cm_pcts:
         color = "#10b981" if v >= 0 else "#ef4444"
@@ -1308,13 +1236,13 @@ def main():
     cm_html += f'<td style="padding:5px 8px;text-align:right;font-weight:700;color:#ef4444;background:#f8fafc;">({fmt_lakhs(sum(fc_values))})</td></tr>'
 
     # Fixed Cost Coverage Ratio
-    coverage = [(cm_values[i] / fc_values[i]) if fc_values[i] > 0 else 0 for i in range(len(months))]
+    coverage = [_safe_div(cm_values[i], fc_values[i]) for i in range(len(months))]
     cm_html += '<tr style="background:#fef3c7;border-top:2px solid #f59e0b;"><td style="padding:6px 12px;font-weight:700;">Fixed Cost Coverage Ratio</td>'
     for v in coverage:
         color = "#10b981" if v >= 1 else "#ef4444"
         display = f"{v:.1f}x" if v != 0 else "—"
         cm_html += f'<td style="padding:6px 6px;text-align:right;font-weight:600;color:{color};">{display}</td>'
-    avg_cov = sum(cm_values) / sum(fc_values) if sum(fc_values) > 0 else 0
+    avg_cov = _safe_div(sum(cm_values), sum(fc_values))
     cm_html += f'<td style="padding:6px 8px;text-align:right;font-weight:700;background:#f8fafc;color:{"#10b981" if avg_cov >= 1 else "#ef4444"}">{avg_cov:.1f}x</td></tr>'
 
     cm_html += '</table>'
@@ -1323,7 +1251,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── TREND ANALYSIS ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">MoM TREND ANALYSIS</div>', unsafe_allow_html=True)
+    section_header("MoM TREND ANALYSIS")
 
     trend_metrics = {
         "Revenue": pnl["Revenue (Net Sales)"],
@@ -1332,11 +1260,11 @@ def main():
         "Receipts (Collections)": [data["receipts"].get(m, 0) for m in months],
     }
 
-    trend_html = '<table style="width:100%;font-size:0.82rem;border-collapse:collapse;font-family:monospace;">'
-    trend_html += '<tr style="background:#1e293b;color:#f8fafc;">'
-    trend_html += '<th style="padding:8px 12px;text-align:left;">Metric</th>'
+    trend_html = '<table class="slv-table" style="font-family:\'JetBrains Mono\',monospace;">'
+    trend_html += '<tr>'
+    trend_html += '<th style="text-align:left;">Metric</th>'
     for ml in month_labels:
-        trend_html += f'<th style="padding:8px 6px;text-align:right;">{ml}</th>'
+        trend_html += f'<th>{ml}</th>'
     trend_html += '</tr>'
 
     for metric_name, values in trend_metrics.items():
@@ -1375,14 +1303,14 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── BURN RATE & RUNWAY ───────────────────────────────────────────────────
-    st.markdown('<div class="section-header">BURN RATE & CASH POSITION</div>', unsafe_allow_html=True)
+    section_header("BURN RATE & CASH POSITION")
 
     col_a, col_b, col_c = st.columns(3)
 
     with col_a:
         burn_months = [(month_labels[i], pnl["NET PROFIT / (LOSS)"][i])
                        for i in range(len(months)) if pnl["NET PROFIT / (LOSS)"][i] < 0]
-        avg_burn = abs(sum(v for _, v in burn_months) / len(burn_months)) if burn_months else 0
+        avg_burn = abs(_safe_div(sum(v for _, v in burn_months), len(burn_months))) if burn_months else 0
 
         st.markdown("**Monthly Burn Rate**")
         burn_html = f"""
@@ -1415,10 +1343,10 @@ def main():
         for i, m in enumerate(months):
             rev = pnl["Revenue (Net Sales)"][i]
             rcpt = data["receipts"].get(m, 0)
-            eff = (rcpt / rev * 100) if rev > 0 else 0
+            eff = _safe_div(rcpt, rev) * 100
             coll_eff_data.append(eff)
 
-        avg_coll = sum(coll_eff_data) / len(coll_eff_data) if coll_eff_data else 0
+        avg_coll = _safe_div(sum(coll_eff_data), len(coll_eff_data)) if coll_eff_data else 0
 
         coll_html = f"""
         <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:1rem;text-align:center;">
@@ -1445,20 +1373,11 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── FOOTER ───────────────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div style="background:#f1f5f9;border-radius:8px;padding:1rem;margin-top:1rem;">
-        <div style="font-size:0.75rem;color:#64748b;text-align:center;">
-            {_mis_company} — Monthly MIS Dashboard &nbsp;|&nbsp; Data: Tally ERP &nbsp;|&nbsp;
-            All amounts in Indian Rupees (Lakhs/Crores) &nbsp;|&nbsp; Generated from live accounting data
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    footer(_mis_company)
 
 
 # ── PERSISTENT CHAT BAR ─────────────────────────────────────────────────────
 st.markdown("---")
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from chat_engine import ask, format_result_as_text
 
 chat_input = st.chat_input("Ask anything — P&L, Balance Sheet, ledger of [party], debtors, creditors...")

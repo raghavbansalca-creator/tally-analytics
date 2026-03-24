@@ -2,12 +2,36 @@
 Seven Labs Vision -- Narration Audit Engine
 Reads voucher narrations from Tally data, classifies transactions,
 flags suspicious entries, and auto-generates audit comments.
+
+Defensive coding: handles missing columns, None values, empty databases.
 """
 
 import sqlite3
 import re
 import os
 from datetime import datetime
+
+# ── SAFE COLUMN ACCESS ───────────────────────────────────────────────────────
+
+def _safe_cols(conn, table):
+    """Return set of column names for a table. Returns empty set on failure."""
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+# ── SAFE AMOUNT PARSING ─────────────────────────────────────────────────────
+
+def _safe_float(val):
+    """Convert to float, returning 0.0 on failure."""
+    if val is None or val == "":
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
 
 # ── CATEGORY DEFINITIONS ─────────────────────────────────────────────────────
 
@@ -16,8 +40,8 @@ CATEGORIES = [
         "name": "Related Party",
         "patterns": [
             r"\bdirector\b", r"\bpromoter\b", r"\brelative\b",
-            r"\bfamily\b", r"\bspouse\b",
-            # Family members — require context (not standalone product names)
+            r"\bfamily\s+(?:member|relation|trust|concern)\b",
+            r"\bspouse\b",
             r"\b(?:his|her|my|the|to|of|for)\s+(?:son|daughter|brother|sister|father|mother)\b",
             r"\bdirector'?s?\s+(?:wife|husband|son|daughter|brother|sister|relative)\b",
             r"\bpartner'?s?\s+(?:wife|husband|capital|drawing|current|loan)\b",
@@ -31,7 +55,7 @@ CATEGORIES = [
             r"\bcash\s+(?:payment|receipt|deposit|withdrawal|paid|received|purchase)\b",
             r"\b(?:paid|received|deposited|withdrawn)\s+(?:in\s+)?cash\b",
             r"\bcash\s+(?:a/?c|account)\b",
-            r"(?:^|\s)cash(?:\s|$)",  # standalone "cash" but not inside words
+            r"(?:^|\s)cash(?:\s|$)",
         ],
         "comment": "Cash transaction - verify Sec 269ST/269SS compliance",
         "severity": "MEDIUM",
@@ -40,11 +64,20 @@ CATEGORIES = [
         "name": "Loan/Advance",
         "patterns": [
             r"\bloan\b", r"\blent\b", r"\bborrowed\b",
-            r"\bemi\b", r"\brepayment\b",
-            # "advance" — exclude "advance tax" which is different
-            r"\badvances?\s+(?:to|from|given|received|paid|against)\b",
+            r"\bemi\b", r"(?:^|[\s_])emi(?:[\s_]|$)",
+            r"\brepayment\b",
+            r"\badvances?\s+(?:to|from|given|received|paid|against|payment|amount)\b",
             r"\b(?:staff|employee|salary|personal)\s+advances?\b",
-            r"\binterest\s+(?:on|paid|received|charged)\b",
+            r"\b(?:transfer|trf|paid\s+for)\s+advances?\b",
+            r"\badvance\s+(?:payment|amount|for|to|from)\b",
+            r"(?:^|\s)advance(?:\s|$)",
+            r"\bint(?:e?re?|re)st\s+(?:on|paid|received|charged|due|capitali[sz]ed|for)\b",
+            r"\bbeing\s+int(?:e?re?|re)st\b",
+            r"\bdebit\s+int(?:e?re?|re)st\b",
+            r"InterestCharged",
+            r"\bcasa\s+(?:debit\s+)?int(?:e?re?|re)st\b",
+            r"\b(?:paid\s+for|for)\s+int(?:e?re?|re)st\b",
+            r"\bsec\s+\d+[a-z]?\s+int(?:e?re?|re)st\b",
         ],
         "comment": "Loan/advance - verify Sec 185/186 compliance, TDS applicability",
         "severity": "MEDIUM",
@@ -52,12 +85,19 @@ CATEGORIES = [
     {
         "name": "Capital Expenditure",
         "patterns": [
-            r"\bpurchase of\b", r"\bacquisition\b", r"\bmachinery\b",
-            r"\bequipment\b", r"\bvehicle\b", r"\bcomputer\b", r"\blaptop\b",
-            r"\bfurniture\b", r"\bair\s*conditioner\b", r"\bbuilding\b",
+            r"\bpurchase of\b", r"\bacquisition\b",
+            r"\b(?:purchase|bought|acquired|new)\s+(?:of\s+)?machinery\b",
+            r"\bmachinery\s+(?:purchase|bought|acquired|cost)\b",
+            r"\b(?:purchase|bought|acquired|new)\s+(?:of\s+)?equipments?\b",
+            r"\bequipments?\s+(?:purchase|bought|acquired|cost)\b",
+            r"\b(?:purchase|bought|acquired|new)\s+(?:of\s+)?vehicles?\b",
+            r"\bvehicles?\s+(?:purchase|bought|acquired|cost)\b",
+            r"\bcomputer\b", r"\blaptop\b",
+            r"\bfurniture\b", r"\bair\s*conditioner\b",
+            r"\b(?:purchase|construction|acquired)\s+(?:of\s+)?building\b",
+            r"\bbuilding\s+(?:purchase|construction|cost|work)\b",
             r"\bfixed\s+asset\b", r"\bcapital\s+(?:asset|goods|item)\b",
         ],
-        # BUG 5 FIX: Removed \bac\b (too short, matches "account")
         "comment": "Capital expenditure - verify capitalization vs revenue treatment",
         "severity": "MEDIUM",
     },
@@ -68,7 +108,6 @@ CATEGORIES = [
             r"\bgratuity\b", r"\bleave encashment\b",
             r"\bpf\b", r"\besi\b", r"\bprofessional tax\b",
             r"\bstipend\b", r"\bhonorarium\b",
-            # "commission" removed — too generic (sales commission vs employee commission)
         ],
         "comment": "Employee payment - verify TDS u/s 192, PF/ESI compliance",
         "severity": "LOW",
@@ -81,6 +120,12 @@ CATEGORIES = [
             r"\blease\s+(?:rent|payment|amount)\b", r"\blicense fee\b",
             r"\bmonthly\s+rent\b",
             r"\brent(?:ed|ing)?\s+(?:office|shop|warehouse|godown|premises|space|room|flat|house)\b",
+            r"\b(?:poclain|jcb|crane|excavator|hydra|loader|mixer|generator|d\.?g\.?|dg|machine|binding\s+machine|exhaust\s+fan)\b.{0,40}\brent\b",
+            r"\brent\s+(?:for|of)\b",
+            r"\bhire\s+(?:charges?|rent)\b", r"\b(?:on|for)\s+hire\b",
+            r"\broom\s+rent\b",
+            r"\bfor\s+rent\b", r"\brent\s+\d+\s+days?\b",
+            r"\bpathak\s+dg\b.{0,20}\brent\b",
         ],
         "comment": "Rent payment - verify TDS u/s 194I, GST RCM if applicable",
         "severity": "LOW",
@@ -88,11 +133,12 @@ CATEGORIES = [
     {
         "name": "Professional/Consultancy",
         "patterns": [
-            r"\bprofessional\s+(?:fee|charge|service)\b",
-            r"\bconsultancy\b", r"\bconsulting\b",  # BUG 7 FIX: added consulting
-            r"\blegal\s+(?:fee|charge|service|expense)\b",
-            r"\baudit\s*fee\b", r"\bca\s+fee\b", r"\bcs\s+fee\b",
+            r"\bprofessional\s+(?:fees?|charges?|services?)\b",
+            r"\bconsultancy\b", r"\bconsulting\b", r"\bconsultants?\b",
+            r"\blegal\s+(?:fees?|charges?|services?|expenses?)\b",
+            r"\baudit\s*fees?\b", r"\bca\s+fees?\b", r"\bcs\s+fees?\b",
             r"\badvocate\b", r"\blawyer\b", r"\badvisory\b",
+            r"\binternal\s+audit\b",
         ],
         "comment": "Professional fee - verify TDS u/s 194J",
         "severity": "LOW",
@@ -101,9 +147,7 @@ CATEGORIES = [
         "name": "Contractor Payments",
         "patterns": [
             r"\bcontractor\b", r"\bsub-contractor\b",
-            r"\blabour\s+(?:charges?|cost|payment|work|contract|worker|chowk)\b",
-            r"\b(?:paid|payment)\s+(?:to|for)\s+labour\b",
-            r"\b\d+\s+(?:labour|worker|painter|mason|carpenter|plumber|electrician)\s+worker\b",
+            r"\blabour\b",
             r"\bworks contract\b", r"\bjob work\b", r"\bfabrication\b",
             r"\bconstruction\s+(?:work|site|charge|cost|material)\b",
         ],
@@ -113,7 +157,7 @@ CATEGORIES = [
     {
         "name": "Insurance",
         "patterns": [
-            r"insurance", r"\bpremium\b",  # BUG 8 FIX: no word boundary at end for "insurance"
+            r"insurance", r"\bpremium\b",
             r"\binsurance\s+(?:policy|premium|renewal|claim)\b",
             r"\bmediclaim\b", r"\blic\b", r"\bgeneral insurance\b",
             r"\bhealth\s+insurance\b", r"\bfire\s+insurance\b",
@@ -127,7 +171,6 @@ CATEGORIES = [
             r"\bprovision\s+(?:for|against|made)\b",
             r"\bwrite\s*off\b", r"\bwritten\s*off\b",
             r"\bbad\s+debt\b", r"\bdoubtful\b", r"\bnpa\b", r"\bwaiver\b",
-            # Exclude "provisional" (too generic)
         ],
         "comment": "Provision/write-off - verify board resolution and documentation",
         "severity": "HIGH",
@@ -136,9 +179,10 @@ CATEGORIES = [
         "name": "Inter-company/Branch",
         "patterns": [
             r"\binter[\s-]?company\b", r"\bbranch\s+transfer\b",
-            r"\bhead\s+office\b", r"\binter[\s-]?unit\b",
+            r"\b(?:transfer|trf)\s+(?:to|from|for)\s+head\s+office\b",
+            r"\bhead\s+office\s+(?:transfer|trf)\b",
+            r"\binter[\s-]?unit\b",
             r"\b(?:transfer\s+(?:to|from)\s+)?branch\s+(?:office|unit|location)\b",
-            # BUG 4 FIX: removed standalone \bbranch\b and \bho\b (matches bank ATM branches)
         ],
         "comment": "Inter-company/branch - verify transfer pricing, GST implications",
         "severity": "MEDIUM",
@@ -146,10 +190,11 @@ CATEGORIES = [
     {
         "name": "Reversal/Correction",
         "patterns": [
-            r"\breversal\b", r"\breversed\b", r"\bcorrection\b",
+            r"\breversal\b", r"\breversed\b",
+            r"\bcorrection\s+(?:entry|entries|voucher|journal|of\s+entry)\b",
+            r"\b(?:entry|entries|voucher|journal)\s+correction\b",
             r"\brectification\b", r"\bmistake\b",
             r"\bwrong\s+entry\b", r"\bentry\s+(?:reversed|corrected)\b",
-            # Removed \berror\b (too generic) and \badjusted\b (too generic)
         ],
         "comment": "Reversal/correction entry - verify original entry and authorization",
         "severity": "HIGH",
@@ -162,7 +207,6 @@ CATEGORIES = [
             r"\byear[\s-]?end\b",
             r"\b(?:accrual|accrued)\b",
             r"\bprepaid\s+(?:expense|rent|insurance|amount)\b",
-            # BUG 3 FIX: removed standalone \bprepaid\b (matches "Amazon Prepaid")
             r"\boutstanding\s+(?:expense|salary|rent|liability)\b",
         ],
         "comment": "Year-end adjustment - verify cut-off and supporting documentation",
@@ -174,7 +218,6 @@ CATEGORIES = [
             r"\bsuspense\b", r"\bclearing\s+(?:a/?c|account|entry)\b",
             r"\btemporary\s+(?:a/?c|account|entry|posting)\b",
             r"\bunidentified\b", r"\bunknown\b",
-            # Removed \bpending\b and \bto be\b (too generic)
             r"\btba\b",
         ],
         "comment": "Suspense/clearing entry - must be cleared before year-end",
@@ -185,7 +228,6 @@ CATEGORIES = [
         "patterns": [
             r"\bdonation\b", r"\bcharity\b", r"\bcsr\b",
             r"\bcontribution\b", r"\bcorpus\b",
-            # Removed \btrust\b (too generic — many businesses are trusts)
         ],
         "comment": "Donation/CSR - verify Sec 80G eligibility, Sec 135 compliance",
         "severity": "MEDIUM",
@@ -197,7 +239,6 @@ CATEGORIES = [
             r"\bforex\b", r"\busd\b", r"\beur\b", r"\bgbp\b",
             r"\bremittance\b", r"\bswift\b", r"\bwire\s+transfer\b",
             r"\bcurrency\s+exchange\b",
-            # BUG 2 FIX: removed standalone \bexchange\b (matches product exchange/return)
         ],
         "comment": "Foreign transaction - verify FEMA compliance, withholding tax",
         "severity": "MEDIUM",
@@ -214,16 +255,21 @@ SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 
 # ── CLASSIFICATION ───────────────────────────────────────────────────────────
 
-def classify_narration(narration: str) -> list[dict]:
+def classify_narration(narration) -> list[dict]:
     """Classify a single narration. Returns list of matched categories with comments.
 
     Each match dict has: category, comment, severity
     A single narration can match multiple categories.
+    Handles None/empty narration gracefully.
     """
     results = []
 
-    # Handle no narration
-    if not narration or not narration.strip():
+    # Handle no narration — coerce to string safely
+    if narration is None:
+        narration = ""
+    narration = str(narration)
+
+    if not narration.strip():
         results.append({
             "category": "No Narration",
             "comment": "WARNING: No narration - transaction purpose unclear",
@@ -250,90 +296,142 @@ def classify_narration(narration: str) -> list[dict]:
     # Match against all categories
     for cat in CATEGORIES:
         for regex in cat["_compiled"]:
-            if regex.search(text):
-                results.append({
-                    "category": cat["name"],
-                    "comment": cat["comment"],
-                    "severity": cat["severity"],
-                })
-                break  # one match per category is enough
+            try:
+                if regex.search(text):
+                    results.append({
+                        "category": cat["name"],
+                        "comment": cat["comment"],
+                        "severity": cat["severity"],
+                    })
+                    break  # one match per category is enough
+            except Exception:
+                # Regex failure on unusual input — skip this pattern
+                continue
 
     return results
 
 
 # ── FULL ANALYSIS ────────────────────────────────────────────────────────────
 
+def _empty_result(error=None):
+    """Return a valid empty result dict."""
+    r = {
+        "total_vouchers": 0,
+        "narrations_analyzed": 0,
+        "no_narration_count": 0,
+        "category_summary": {},
+        "flagged_vouchers": [],
+        "risk_summary": {"high": 0, "medium": 0, "low": 0},
+    }
+    if error:
+        r["error"] = str(error)
+    return r
+
+
 def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
     """Analyze all voucher narrations in the database.
 
-    Args:
-        db_path: Path to the SQLite database.
-        from_date: Optional start date filter (YYYYMMDD string).
-        to_date: Optional end date filter (YYYYMMDD string).
-
-    Returns dict with total_vouchers, narrations_analyzed, category_summary,
-    flagged_vouchers, risk_summary.
+    Defensive: handles missing NARRATION, VOUCHERTYPENAME, AMOUNT,
+    PARTYLEDGERNAME columns gracefully.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except Exception as e:
+        return _empty_result(f"Could not open database: {e}")
+
+    # Check which columns exist in trn_voucher
+    vch_cols = _safe_cols(conn, "trn_voucher")
+    acct_cols = _safe_cols(conn, "trn_accounting")
+
+    has_narration = "NARRATION" in vch_cols
+    has_vtype = "VOUCHERTYPENAME" in vch_cols
+    has_vnum = "VOUCHERNUMBER" in vch_cols
+    has_party = "PARTYLEDGERNAME" in vch_cols
+    has_date = "DATE" in vch_cols
+    has_guid = "GUID" in vch_cols
+    has_amount_col = "AMOUNT" in acct_cols
+    has_voucher_guid = "VOUCHER_GUID" in acct_cols
+
+    if not has_guid:
+        conn.close()
+        return _empty_result("trn_voucher table missing GUID column")
+
+    # Build SELECT columns dynamically
+    select_parts = ["v.GUID"]
+    select_parts.append("v.DATE" if has_date else "'' as DATE")
+    select_parts.append("v.VOUCHERTYPENAME" if has_vtype else "'' as VOUCHERTYPENAME")
+    select_parts.append("v.VOUCHERNUMBER" if has_vnum else "'' as VOUCHERNUMBER")
+    select_parts.append("v.PARTYLEDGERNAME" if has_party else "'' as PARTYLEDGERNAME")
+    select_parts.append("v.NARRATION" if has_narration else "'' as NARRATION")
+
+    # Amount subquery — only if trn_accounting has the right columns
+    if has_amount_col and has_voucher_guid:
+        select_parts.append(
+            "COALESCE("
+            "(SELECT SUM(ABS(CAST(a.AMOUNT AS REAL))) "
+            "FROM trn_accounting a "
+            "WHERE a.VOUCHER_GUID = v.GUID AND CAST(a.AMOUNT AS REAL) > 0), 0) as amount"
+        )
+    else:
+        select_parts.append("0 as amount")
 
     # Build query
     date_filter = ""
     params = []
-    if from_date:
+    if from_date and has_date:
         date_filter += " AND v.DATE >= ?"
         params.append(from_date)
-    if to_date:
+    if to_date and has_date:
         date_filter += " AND v.DATE <= ?"
         params.append(to_date)
 
     sql = f"""
-    SELECT
-        v.GUID,
-        v.DATE,
-        v.VOUCHERTYPENAME,
-        v.VOUCHERNUMBER,
-        v.PARTYLEDGERNAME,
-        v.NARRATION,
-        COALESCE(
-            (SELECT SUM(ABS(CAST(a.AMOUNT AS REAL)))
-             FROM trn_accounting a
-             WHERE a.VOUCHER_GUID = v.GUID AND CAST(a.AMOUNT AS REAL) > 0),
-            0
-        ) as amount
+    SELECT {', '.join(select_parts)}
     FROM trn_voucher v
     WHERE 1=1{date_filter}
     ORDER BY v.DATE
     """
 
-    rows = conn.execute(sql, params).fetchall()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except Exception as e:
+        conn.close()
+        return _empty_result(f"Query failed: {e}")
+
     conn.close()
+
+    if not rows:
+        return _empty_result()
 
     total_vouchers = len(rows)
     narrations_analyzed = 0
     no_narration_count = 0
 
-    # Category summary: {name: {count, total_amount, vouchers[]}}
     category_summary = {}
     flagged_vouchers = []
 
     for row in rows:
-        guid = row["GUID"]
-        date_raw = row["DATE"] or ""
-        vtype = row["VOUCHERTYPENAME"] or ""
-        vnum = row["VOUCHERNUMBER"] or ""
-        party = row["PARTYLEDGERNAME"] or ""
-        narration = row["NARRATION"] or ""
-        amount = float(row["amount"] or 0)
+        try:
+            guid = row["GUID"] or ""
+            date_raw = row["DATE"] or ""
+            vtype = row["VOUCHERTYPENAME"] or ""
+            vnum = row["VOUCHERNUMBER"] or ""
+            party = row["PARTYLEDGERNAME"] or ""
+            narration = row["NARRATION"] or ""
+            amount = _safe_float(row["amount"])
+        except (KeyError, IndexError):
+            continue
 
-        # Format date for display
         display_date = _format_date(date_raw)
 
         narrations_analyzed += 1
         matches = classify_narration(narration)
 
-        # BUG 9 FIX: Also flag if party ledger is "Cash" (even if narration doesn't say "cash")
-        if party and party.strip().upper() in ("CASH", "CASH A/C", "CASH ACCOUNT", "CASH IN HAND", "CASH-IN-HAND", "PETTY CASH"):
+        # Also flag if party ledger is "Cash"
+        if party and str(party).strip().upper() in (
+            "CASH", "CASH A/C", "CASH ACCOUNT", "CASH IN HAND", "CASH-IN-HAND", "PETTY CASH"
+        ):
             cash_already = any(m["category"] == "Cash Transactions" for m in matches)
             if not cash_already:
                 matches.append({
@@ -345,29 +443,24 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
         if not matches:
             continue
 
-        # Check if "No Narration" is among matches
         cat_names = [m["category"] for m in matches]
         if "No Narration" in cat_names:
             no_narration_count += 1
 
-        # Determine highest severity among matches
         highest_severity = _highest_severity(matches)
 
-        # For "No Narration" on large amounts, bump to HIGH
         if "No Narration" in cat_names and amount >= 100000:
             highest_severity = "HIGH"
 
         comments = list(dict.fromkeys(m["comment"] for m in matches))
         categories = list(dict.fromkeys(m["category"] for m in matches))
 
-        # Update category summary
         for m in matches:
             cname = m["category"]
             if cname not in category_summary:
                 category_summary[cname] = {"count": 0, "total_amount": 0.0, "vouchers": []}
             category_summary[cname]["count"] += 1
             category_summary[cname]["total_amount"] += amount
-            # Limit stored vouchers per category to avoid memory bloat
             if len(category_summary[cname]["vouchers"]) < 500:
                 category_summary[cname]["vouchers"].append({
                     "guid": guid,
@@ -376,7 +469,7 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
                     "voucher_number": vnum,
                     "party": party,
                     "amount": amount,
-                    "narration": narration[:300],
+                    "narration": str(narration)[:300],
                 })
 
         flagged_vouchers.append({
@@ -386,18 +479,16 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
             "voucher_number": vnum,
             "party": party,
             "amount": amount,
-            "narration": narration[:300],
+            "narration": str(narration)[:300],
             "categories": categories,
             "comments": comments,
             "severity": highest_severity,
         })
 
-    # Sort flagged vouchers: severity (HIGH first), then amount descending
     flagged_vouchers.sort(
-        key=lambda v: (SEVERITY_ORDER.get(v["severity"], 9), -v["amount"])
+        key=lambda v: (SEVERITY_ORDER.get(v["severity"], 9), -v.get("amount", 0))
     )
 
-    # Risk summary
     risk_summary = {
         "high": sum(1 for v in flagged_vouchers if v["severity"] == "HIGH"),
         "medium": sum(1 for v in flagged_vouchers if v["severity"] == "MEDIUM"),
@@ -417,18 +508,28 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
 # ── SINGLE VOUCHER COMMENTS ─────────────────────────────────────────────────
 
 def get_voucher_comments(db_path: str, voucher_guid: str) -> dict:
-    """Get auto-generated comments for a specific voucher.
+    """Get auto-generated comments for a specific voucher."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except Exception as e:
+        return {"error": f"Could not open database: {e}"}
 
-    Returns dict with guid, narration, categories, comments, severity.
-    """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    vch_cols = _safe_cols(conn, "trn_voucher")
 
-    row = conn.execute(
-        "SELECT GUID, NARRATION, VOUCHERTYPENAME, VOUCHERNUMBER, "
-        "PARTYLEDGERNAME, DATE FROM trn_voucher WHERE GUID = ?",
-        (voucher_guid,)
-    ).fetchone()
+    select_parts = ["GUID"]
+    for col in ["NARRATION", "VOUCHERTYPENAME", "VOUCHERNUMBER", "PARTYLEDGERNAME", "DATE"]:
+        select_parts.append(col if col in vch_cols else f"'' as {col}")
+
+    try:
+        row = conn.execute(
+            f"SELECT {', '.join(select_parts)} FROM trn_voucher WHERE GUID = ?",
+            (voucher_guid,)
+        ).fetchone()
+    except Exception as e:
+        conn.close()
+        return {"error": f"Query failed: {e}"}
+
     conn.close()
 
     if not row:
@@ -453,23 +554,19 @@ def get_voucher_comments(db_path: str, voucher_guid: str) -> dict:
 # ── EXCEL EXPORT ─────────────────────────────────────────────────────────────
 
 def export_narration_report(analysis_result: dict, output_path: str):
-    """Export analysis to Excel with sheets: Summary, Flagged Vouchers, Category Details.
+    """Export analysis to Excel with sheets: Summary, Flagged Vouchers, Category Details."""
+    if not analysis_result:
+        return
 
-    Args:
-        analysis_result: Output from analyze_all_narrations().
-        output_path: Path for the .xlsx file.
-    """
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     except ImportError:
-        # Fallback: try pandas Excel writer
         _export_with_pandas(analysis_result, output_path)
         return
 
     wb = openpyxl.Workbook()
 
-    # ── Sheet 1: Summary ─────────────────────────────────────────────────
     ws_sum = wb.active
     ws_sum.title = "Summary"
 
@@ -485,7 +582,6 @@ def export_narration_report(analysis_result: dict, output_path: str):
         top=Side(style="thin"), bottom=Side(style="thin"),
     )
 
-    # Title
     ws_sum.merge_cells("A1:D1")
     ws_sum["A1"] = "Narration Audit Report"
     ws_sum["A1"].font = Font(bold=True, size=14)
@@ -510,7 +606,6 @@ def export_narration_report(analysis_result: dict, output_path: str):
     ws_sum["B10"] = risk.get("low", 0)
     ws_sum["A10"].fill = severity_fills["LOW"]
 
-    # Category summary table
     ws_sum["A12"] = "Category"
     ws_sum["B12"] = "Count"
     ws_sum["C12"] = "Total Amount"
@@ -521,11 +616,11 @@ def export_narration_report(analysis_result: dict, output_path: str):
 
     row_idx = 13
     cat_summary = analysis_result.get("category_summary", {})
-    for cname in sorted(cat_summary.keys(), key=lambda k: -cat_summary[k]["count"]):
+    for cname in sorted(cat_summary.keys(), key=lambda k: -cat_summary[k].get("count", 0)):
         cdata = cat_summary[cname]
         ws_sum.cell(row=row_idx, column=1, value=cname).border = thin_border
-        ws_sum.cell(row=row_idx, column=2, value=cdata["count"]).border = thin_border
-        ws_sum.cell(row=row_idx, column=3, value=round(cdata["total_amount"], 2)).border = thin_border
+        ws_sum.cell(row=row_idx, column=2, value=cdata.get("count", 0)).border = thin_border
+        ws_sum.cell(row=row_idx, column=3, value=round(cdata.get("total_amount", 0), 2)).border = thin_border
         ws_sum.cell(row=row_idx, column=3).number_format = "#,##0.00"
         row_idx += 1
 
@@ -533,7 +628,6 @@ def export_narration_report(analysis_result: dict, output_path: str):
     ws_sum.column_dimensions["B"].width = 15
     ws_sum.column_dimensions["C"].width = 20
 
-    # ── Sheet 2: Flagged Vouchers ────────────────────────────────────────
     ws_flag = wb.create_sheet("Flagged Vouchers")
     flag_headers = ["Date", "Voucher Type", "Number", "Party", "Amount",
                     "Narration", "Categories", "Comments", "Severity"]
@@ -552,8 +646,10 @@ def export_narration_report(analysis_result: dict, output_path: str):
         amt_cell.number_format = "#,##0.00"
         amt_cell.border = thin_border
         ws_flag.cell(row=ri, column=6, value=v.get("narration", "")).border = thin_border
-        ws_flag.cell(row=ri, column=7, value=", ".join(v.get("categories", []))).border = thin_border
-        ws_flag.cell(row=ri, column=8, value="; ".join(v.get("comments", []))).border = thin_border
+        cats = v.get("categories", [])
+        ws_flag.cell(row=ri, column=7, value=", ".join(cats) if isinstance(cats, list) else str(cats)).border = thin_border
+        comms = v.get("comments", [])
+        ws_flag.cell(row=ri, column=8, value="; ".join(comms) if isinstance(comms, list) else str(comms)).border = thin_border
         sev_cell = ws_flag.cell(row=ri, column=9, value=v.get("severity", ""))
         sev_cell.border = thin_border
         sev = v.get("severity", "")
@@ -563,7 +659,6 @@ def export_narration_report(analysis_result: dict, output_path: str):
     for ci, w in enumerate([12, 14, 12, 25, 15, 50, 30, 50, 10], 1):
         ws_flag.column_dimensions[chr(64 + ci)].width = w
 
-    # ── Sheet 3: Category Details ────────────────────────────────────────
     ws_cat = wb.create_sheet("Category Details")
     cat_headers = ["Category", "Date", "Voucher Type", "Number", "Party", "Amount", "Narration"]
     for ci, h in enumerate(cat_headers, 1):
@@ -597,7 +692,6 @@ def _export_with_pandas(analysis_result: dict, output_path: str):
     import pandas as pd
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        # Summary sheet
         summary_data = {
             "Metric": ["Total Vouchers", "Narrations Analyzed", "No Narration Count",
                         "HIGH Severity", "MEDIUM Severity", "LOW Severity"],
@@ -612,18 +706,20 @@ def _export_with_pandas(analysis_result: dict, output_path: str):
         }
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
 
-        # Flagged vouchers
         flagged = analysis_result.get("flagged_vouchers", [])
         if flagged:
             df_flag = pd.DataFrame(flagged)
-            df_flag["categories"] = df_flag["categories"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
-            df_flag["comments"] = df_flag["comments"].apply(lambda x: "; ".join(x) if isinstance(x, list) else x)
+            if "categories" in df_flag.columns:
+                df_flag["categories"] = df_flag["categories"].apply(
+                    lambda x: ", ".join(x) if isinstance(x, list) else str(x or ""))
+            if "comments" in df_flag.columns:
+                df_flag["comments"] = df_flag["comments"].apply(
+                    lambda x: "; ".join(x) if isinstance(x, list) else str(x or ""))
             cols = ["date", "voucher_type", "voucher_number", "party", "amount",
                     "narration", "categories", "comments", "severity"]
             df_flag = df_flag[[c for c in cols if c in df_flag.columns]]
             df_flag.to_excel(writer, sheet_name="Flagged Vouchers", index=False)
 
-        # Category details
         cat_rows = []
         for cname, cdata in analysis_result.get("category_summary", {}).items():
             for v in cdata.get("vouchers", []):
@@ -634,9 +730,12 @@ def _export_with_pandas(analysis_result: dict, output_path: str):
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 
-def _format_date(date_str: str) -> str:
+def _format_date(date_str) -> str:
     """Convert Tally date format (YYYYMMDD) to display format (DD-Mon-YYYY)."""
-    if not date_str or len(date_str) < 8:
+    if not date_str:
+        return ""
+    date_str = str(date_str)
+    if len(date_str) < 8:
         return date_str
     try:
         dt = datetime.strptime(date_str[:8], "%Y%m%d")
