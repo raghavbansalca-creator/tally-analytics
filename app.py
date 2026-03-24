@@ -438,7 +438,7 @@ def show_group():
                 for sg in sorted(all_groups):
                     _sg_subs = list(get_all_groups_under(conn, [sg]))
                     _sg_ph = ",".join(["?"] * len(_sg_subs))
-                    sg_row = conn.execute(f"SELECT SUM(ABS(CAST({bc} AS REAL))) FROM mst_ledger WHERE PARENT IN ({_sg_ph})", _sg_subs).fetchone()
+                    sg_row = conn.execute(f"SELECT ABS(SUM(CAST({bc} AS REAL))) FROM mst_ledger WHERE PARENT IN ({_sg_ph})", _sg_subs).fetchone()
                     sg_total = (sg_row[0] if sg_row else 0) or 0
                     if sg_total > 0:
                         if st.button(f"> {sg}   --   {fmt(sg_total)}", key=f"sg_{sg}"):

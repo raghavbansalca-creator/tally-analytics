@@ -272,7 +272,7 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                COUNT(DISTINCT v.GUID) as vch_count,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as sales_amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as sales_amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -285,7 +285,7 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                COUNT(DISTINCT v.GUID) as vch_count,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -298,7 +298,7 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                a.LEDGERNAME,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -314,7 +314,7 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                a.LEDGERNAME,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -333,7 +333,7 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     # Monthly Receipts
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         WHERE v.VOUCHERTYPENAME = 'Receipt' AND a.ISDEEMEDPOSITIVE = 'Yes'{_df}
@@ -344,7 +344,7 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     # Monthly Payments
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         WHERE v.VOUCHERTYPENAME = 'Payment' AND a.ISDEEMEDPOSITIVE = 'Yes'{_df}
@@ -371,7 +371,7 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     # Top 5 customers
     top5 = conn.execute(f"""
         SELECT v.PARTYLEDGERNAME as party,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as total_sales
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as total_sales
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -402,11 +402,11 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     _d_ph, _d_g = _nature_ph(conn, 'debtors')
     _c_ph, _c_g = _nature_ph(conn, 'creditors')
     data["total_debtors"] = conn.execute(
-        f"SELECT COALESCE(SUM(ABS(CAST({_mis_bc} AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_d_ph})",
+        f"SELECT COALESCE(ABS(SUM(CAST({_mis_bc} AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_d_ph})",
         _d_g
     ).fetchone()[0]
     data["total_creditors"] = conn.execute(
-        f"SELECT COALESCE(SUM(ABS(CAST({_mis_bc} AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_c_ph})",
+        f"SELECT COALESCE(ABS(SUM(CAST({_mis_bc} AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_c_ph})",
         _c_g
     ).fetchone()[0]
 
@@ -438,7 +438,7 @@ def drill_revenue(month_code):
     s_ph, s_g = _nature_ph(conn, 'sales')
     rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -456,7 +456,7 @@ def drill_purchases(month_code):
     p_ph, p_g = _nature_ph(conn, 'purchase')
     rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -531,7 +531,7 @@ def drill_customer_invoices(party_name):
     rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, SUBSTR(v.DATE,1,6) as month,
                v.NARRATION,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME

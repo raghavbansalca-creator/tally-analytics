@@ -221,7 +221,7 @@ def _analyze_historical_impl(conn, months_back):
     # ---- Monthly receipts (Receipt vouchers, deemed-positive side) ----
     receipt_rows = conn.execute("""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         WHERE v.VOUCHERTYPENAME = 'Receipt' AND a.ISDEEMEDPOSITIVE = 'Yes'
@@ -232,7 +232,7 @@ def _analyze_historical_impl(conn, months_back):
     # ---- Monthly payments (Payment vouchers, deemed-positive side) ----
     payment_rows = conn.execute("""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         WHERE v.VOUCHERTYPENAME = 'Payment' AND a.ISDEEMEDPOSITIVE = 'Yes'
@@ -244,7 +244,7 @@ def _analyze_historical_impl(conn, months_back):
     _s_ph, _s_g = _nature_ph_cf(conn, 'sales')
     sales_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -257,7 +257,7 @@ def _analyze_historical_impl(conn, months_back):
     _p_ph, _p_g = _nature_ph_cf(conn, 'purchase')
     purchase_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -272,7 +272,7 @@ def _analyze_historical_impl(conn, months_back):
         _sal_ph, _sal_g = _group_ph_cf(conn, ["Salary Expenses"])
         salary_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -287,7 +287,7 @@ def _analyze_historical_impl(conn, months_back):
     _dt_ph, _dt_g = _nature_ph_cf(conn, 'duties_taxes')
     gst_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -302,7 +302,7 @@ def _analyze_historical_impl(conn, months_back):
     # ---- TDS payments (recursive) ----
     tds_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -319,7 +319,7 @@ def _analyze_historical_impl(conn, months_back):
         _rnt_ph, _rnt_g = _group_ph_cf(conn, ["Rent Expenses"])
         rent_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -336,7 +336,7 @@ def _analyze_historical_impl(conn, months_back):
         _ln_ph, _ln_g = _nature_ph_cf(conn, 'loans')
         loan_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -421,7 +421,7 @@ def _analyze_historical_impl(conn, months_back):
         try:
             _dr_ph, _dr_g = _nature_ph_cf(conn, 'debtors')
             debtor_row = conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST({_bc_cf} AS REAL))), 0)
+                SELECT COALESCE(ABS(SUM(CAST({_bc_cf} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({_dr_ph})
             """, _dr_g).fetchone()
             total_receivables = (debtor_row[0] if debtor_row else 0) or 0
@@ -431,7 +431,7 @@ def _analyze_historical_impl(conn, months_back):
         try:
             _cr_ph, _cr_g = _nature_ph_cf(conn, 'creditors')
             creditor_row = conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST({_bc_cf} AS REAL))), 0)
+                SELECT COALESCE(ABS(SUM(CAST({_bc_cf} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({_cr_ph})
             """, _cr_g).fetchone()
             total_payables = (creditor_row[0] if creditor_row else 0) or 0

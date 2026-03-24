@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
+_MONTH_ABBREVS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _dynamic_month_label(ym):
+    """Convert YYYYMM code like '202504' to \"Apr'25\" dynamically."""
+    if not ym or len(ym) < 6:
+        return str(ym or "")
+    try:
+        y = int(ym[:4])
+        m = int(ym[4:6])
+        return f"{_MONTH_ABBREVS[m]}'{str(y)[-2:]}"
+    except (ValueError, IndexError):
+        return ym
+
 
 def _group_ph(conn, root_groups):
     """Return (placeholders_sql, group_list) for recursive group queries."""
@@ -381,7 +396,7 @@ WORKING CAPITAL:
             try:
                 rows = conn.execute("""
                     SELECT VOUCHERTYPENAME, COUNT(*) as cnt,
-                           SUM(ABS(CAST(
+                           ABS(SUM(CAST(
                                (SELECT a.AMOUNT FROM trn_accounting a
                                 WHERE a.VOUCHER_GUID = trn_voucher.GUID
                                 AND a.ISDEEMEDPOSITIVE = 'Yes' LIMIT 1) AS REAL))) as total
@@ -1477,7 +1492,7 @@ def smart_answer(question):
             month_name = _month_full(month_code)
             _ie_ph, _ie_g = _nature_ph(conn, 'indirect_expense')
             rows = conn.execute(f"""
-                SELECT a.LEDGERNAME, SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                SELECT a.LEDGERNAME, ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -1684,7 +1699,7 @@ def smart_answer(question):
                     # Total sales with this party (recursive sub-groups)
                     _sp, _sg = _nature_ph(conn, 'sales')
                     sales_total = conn.execute(f"""
-                        SELECT COUNT(DISTINCT v.GUID), COALESCE(SUM(ABS(CAST(a.AMOUNT AS REAL))), 0)
+                        SELECT COUNT(DISTINCT v.GUID), COALESCE(ABS(SUM(CAST(a.AMOUNT AS REAL))), 0)
                         FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
                         WHERE v.PARTYLEDGERNAME = ? AND l.PARENT IN ({_sp})
@@ -1692,7 +1707,7 @@ def smart_answer(question):
                     # Total purchases (recursive sub-groups)
                     _pp, _pg = _nature_ph(conn, 'purchase')
                     purch_total = conn.execute(f"""
-                        SELECT COUNT(DISTINCT v.GUID), COALESCE(SUM(ABS(CAST(a.AMOUNT AS REAL))), 0)
+                        SELECT COUNT(DISTINCT v.GUID), COALESCE(ABS(SUM(CAST(a.AMOUNT AS REAL))), 0)
                         FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
                         WHERE v.PARTYLEDGERNAME = ? AND l.PARENT IN ({_pp})
@@ -1843,7 +1858,7 @@ def smart_answer(question):
             _sp2, _sg2 = _nature_ph(conn, 'sales')
             highest = conn.execute(f"""
                 SELECT v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.DATE,
-                       SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                       ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
                 WHERE l.PARENT IN ({_sp2})
@@ -1863,7 +1878,7 @@ def smart_answer(question):
             _sp3, _sg3 = _nature_ph(conn, 'sales')
             row = conn.execute(f"""
                 SELECT v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.DATE,
-                       SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                       ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
                 WHERE l.PARENT IN ({_sp3})

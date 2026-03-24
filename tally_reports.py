@@ -885,7 +885,7 @@ def voucher_summary(conn, from_date=None, to_date=None, voucher_types=None):
            SUM(CASE WHEN CAST(a_total AS REAL) > 0 THEN CAST(a_total AS REAL) ELSE 0 END) as total_amount
     FROM (
         SELECT v.VOUCHERTYPENAME,
-               (SELECT SUM(ABS(CAST(a.AMOUNT AS REAL)))
+               (SELECT ABS(SUM(CAST(a.AMOUNT AS REAL)))
                 FROM trn_accounting a WHERE a.VOUCHER_GUID = v.GUID
                 AND CAST(a.AMOUNT AS REAL) > 0) as a_total
         FROM trn_voucher v

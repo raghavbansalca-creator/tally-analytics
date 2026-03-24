@@ -171,7 +171,7 @@ def monthly_sales(conn, date_from=None, date_to=None, voucher_types=None):
         return conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    COUNT(DISTINCT v.GUID) as vch_count,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as sales_amt
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as sales_amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -205,7 +205,7 @@ def monthly_purchases(conn, date_from=None, date_to=None, voucher_types=None):
         return conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    COUNT(DISTINCT v.GUID) as vch_count,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -242,7 +242,7 @@ def monthly_receipts_payments(conn, date_from=None, date_to=None):
             receipts = conn.execute(f"""
                 SELECT SUBSTR(v.DATE,1,6) as month,
                        COUNT(DISTINCT v.GUID) as cnt,
-                       SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                       ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 WHERE v.VOUCHERTYPENAME IN ({rph}){deemed_filter}{date_filter}
@@ -259,7 +259,7 @@ def monthly_receipts_payments(conn, date_from=None, date_to=None):
             payments = conn.execute(f"""
                 SELECT SUBSTR(v.DATE,1,6) as month,
                        COUNT(DISTINCT v.GUID) as cnt,
-                       SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                       ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 WHERE v.VOUCHERTYPENAME IN ({pph}){deemed_filter}{date_filter}
@@ -294,7 +294,7 @@ def monthly_expenses(conn, date_from=None, date_to=None, voucher_types=None):
         return conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    a.LEDGERNAME,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -336,7 +336,7 @@ def monthly_gross_profit(conn, date_from=None, date_to=None, voucher_types=None)
     try:
         exp_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -399,7 +399,7 @@ def top_customers_by_sales(conn, limit=15, date_from=None, date_to=None,
         return conn.execute(f"""
             SELECT v.PARTYLEDGERNAME as party,
                    COUNT(DISTINCT v.GUID) as invoice_count,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as total_sales
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as total_sales
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -440,7 +440,7 @@ def top_suppliers_by_purchase(conn, limit=15, date_from=None, date_to=None,
         return conn.execute(f"""
             SELECT v.PARTYLEDGERNAME as party,
                    COUNT(DISTINCT v.GUID) as invoice_count,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as total_purchases
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as total_purchases
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -474,7 +474,7 @@ def customer_monthly_sales(conn, top_n=5, date_from=None, date_to=None):
         try:
             rows = conn.execute(f"""
                 SELECT SUBSTR(v.DATE,1,6) as month,
-                       SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                       ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -666,7 +666,7 @@ def cash_flow_statement(conn, date_from=None, date_to=None):
             deemed_filter = " AND a.ISDEEMEDPOSITIVE = 'Yes'" if has_deemed else ""
             try:
                 row = conn.execute(f"""
-                    SELECT COALESCE(SUM(ABS(CAST(a.AMOUNT AS REAL))), 0)
+                    SELECT COALESCE(ABS(SUM(CAST(a.AMOUNT AS REAL))), 0)
                     FROM trn_voucher v
                     JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                     WHERE v.VOUCHERTYPENAME IN ({rph}){deemed_filter}
@@ -683,7 +683,7 @@ def cash_flow_statement(conn, date_from=None, date_to=None):
             deemed_filter = " AND a.ISDEEMEDPOSITIVE = 'Yes'" if has_deemed else ""
             try:
                 row = conn.execute(f"""
-                    SELECT COALESCE(SUM(ABS(CAST(a.AMOUNT AS REAL))), 0)
+                    SELECT COALESCE(ABS(SUM(CAST(a.AMOUNT AS REAL))), 0)
                     FROM trn_voucher v
                     JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                     WHERE v.VOUCHERTYPENAME IN ({pph}){deemed_filter}
@@ -820,7 +820,7 @@ def working_capital_analysis(conn, date_from=None, date_to=None):
             bc = _bal_col(conn)
             try:
                 row = conn.execute(f"""
-                    SELECT COALESCE(SUM(ABS(CAST({bc} AS REAL))), 0)
+                    SELECT COALESCE(ABS(SUM(CAST({bc} AS REAL))), 0)
                     FROM mst_ledger WHERE PARENT IN ({ph})
                 """, list(all_groups)).fetchone()
                 return (row[0] or 0) if row else 0
@@ -899,12 +899,12 @@ def key_ratios(conn, date_from=None, date_to=None):
         try:
             d_ph, d_groups = _nature_placeholders(conn, 'debtors')
             total_debtors = _safe_fetchone_val(conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST({bc} AS REAL))), 0)
+                SELECT COALESCE(ABS(SUM(CAST({bc} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({d_ph})
             """, d_groups))
             c_ph, c_groups = _nature_placeholders(conn, 'creditors')
             total_creditors = _safe_fetchone_val(conn.execute(f"""
-                SELECT COALESCE(SUM(ABS(CAST({bc} AS REAL))), 0)
+                SELECT COALESCE(ABS(SUM(CAST({bc} AS REAL))), 0)
                 FROM mst_ledger WHERE PARENT IN ({c_ph})
             """, c_groups))
         except sqlite3.OperationalError:
@@ -962,7 +962,7 @@ def collection_efficiency(conn, date_from=None, date_to=None):
         try:
             rows = conn.execute(f"""
                 SELECT SUBSTR(v.DATE,1,6) as month,
-                       SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
+                       ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 WHERE v.VOUCHERTYPENAME IN ({rph}){deemed_filter}{date_filter}
@@ -994,7 +994,7 @@ def drill_monthly_invoices(conn, month_code, ledger_parent):
     try:
         return conn.execute(f"""
             SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -1014,7 +1014,7 @@ def drill_party_invoices(conn, party_name, ledger_parent):
     try:
         return conn.execute(f"""
             SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.VOUCHERTYPENAME,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -1077,7 +1077,7 @@ def drill_receipt_payment_vouchers(conn, month_code, voucher_type):
     try:
         return conn.execute(f"""
             SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME,
-                   SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
+                   ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             WHERE v.VOUCHERTYPENAME = ?{deemed_filter}

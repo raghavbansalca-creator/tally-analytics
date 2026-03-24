@@ -295,7 +295,7 @@ def tds_summary_by_section(conn, date_from=None, date_to=None):
     rows = conn.execute(f"""
         SELECT a.LEDGERNAME,
                v.PARTYLEDGERNAME,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as tds_amount
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as tds_amount
         FROM trn_accounting a
         JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
         WHERE a.LEDGERNAME IN ({placeholders})
@@ -436,7 +436,7 @@ def tds_monthly_trend(conn, date_from=None, date_to=None):
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE, 1, 6) as month,
                a.LEDGERNAME,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as tds_amount
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as tds_amount
         FROM trn_accounting a
         JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
         WHERE a.LEDGERNAME IN ({placeholders})
@@ -515,7 +515,7 @@ def tds_quarterly_summary(conn, date_from=None, date_to=None):
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE, 1, 6) as month,
                a.LEDGERNAME,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as tds_amount
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as tds_amount
         FROM trn_accounting a
         JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
         WHERE a.LEDGERNAME IN ({placeholders})
@@ -625,7 +625,7 @@ def tds_threshold_check(conn, date_from=None, date_to=None):
     rows = conn.execute(f"""
         SELECT v.PARTYLEDGERNAME,
                a.LEDGERNAME,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as total_paid
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as total_paid
         FROM trn_accounting a
         JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
         WHERE a.LEDGERNAME IN ({exp_ph})
@@ -715,7 +715,7 @@ def tds_pan_check(conn):
     # Get parties with TDS and their total TDS
     rows = conn.execute(f"""
         SELECT v.PARTYLEDGERNAME,
-               SUM(ABS(CAST(a.AMOUNT AS REAL))) as tds_amount
+               ABS(SUM(CAST(a.AMOUNT AS REAL))) as tds_amount
         FROM trn_accounting a
         JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
         WHERE a.LEDGERNAME IN ({placeholders})
