@@ -381,6 +381,26 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     """, _s_g + _dp).fetchall()
     data["top5_customers"] = top5
 
+    # Stock-in-Hand (Opening & Closing for P&L stock adjustment)
+    _stock_groups = get_groups_by_nature(conn, 'stock') if hasattr(get_groups_by_nature, '__call__') else []
+    if not _stock_groups:
+        try:
+            _stock_groups = [r[0] for r in conn.execute("SELECT NAME FROM mst_group WHERE UPPER(NAME) LIKE '%STOCK%HAND%' OR UPPER(RESERVEDNAME) LIKE '%STOCK%HAND%'").fetchall()]
+        except Exception:
+            _stock_groups = []
+    _mis_cols_s = {r[1] for r in conn.execute("PRAGMA table_info(mst_ledger)").fetchall()}
+    _mis_bc_s = "COMPUTED_CB" if "COMPUTED_CB" in _mis_cols_s else "CLOSINGBALANCE"
+    data["opening_stock"] = 0
+    data["closing_stock"] = 0
+    if _stock_groups:
+        _sk_ph = ",".join(["?"] * len(_stock_groups))
+        try:
+            row = conn.execute(f"SELECT COALESCE(SUM(ABS(CAST(OPENINGBALANCE AS REAL))), 0), COALESCE(SUM(ABS(CAST({_mis_bc_s} AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_sk_ph})", _stock_groups).fetchone()
+            data["opening_stock"] = row[0] or 0
+            data["closing_stock"] = row[1] or 0
+        except Exception:
+            pass
+
     # Bank/Cash balances (flag-based sub-groups)
     _bk_groups = get_groups_by_nature(conn, 'bank') + get_groups_by_nature(conn, 'bank_od') + get_groups_by_nature(conn, 'cash')
     _bk_groups = list(dict.fromkeys(_bk_groups))  # deduplicate
@@ -637,11 +657,28 @@ def build_pnl(data, months):
         for i in range(len(months))
     ]
 
-    # Net Profit (same as EBITDA for this dataset — no other income/tax)
-    pnl["NET PROFIT / (LOSS)"] = ebitda
+    # Stock Adjustment (Change in Inventory)
+    opening_stock = data.get("opening_stock", 0) or 0
+    closing_stock = data.get("closing_stock", 0) or 0
+    stock_change = opening_stock - closing_stock  # Positive = stock consumed (expense)
+    if abs(stock_change) > 0:
+        # Spread stock change evenly across months for display
+        # (actual stock is an annual adjustment, not monthly)
+        per_month = stock_change / len(months) if months else 0
+        pnl["Less: Stock Adjustment (Op-Cl)"] = [round(per_month, 2) for _ in months]
+
+    # Net Profit = EBITDA - Stock Adjustment
+    net_profit = []
+    for i in range(len(months)):
+        np_val = ebitda[i] - (stock_change / len(months) if months and abs(stock_change) > 0 else 0)
+        net_profit.append(np_val)
+    pnl["NET PROFIT / (LOSS)"] = net_profit
 
     # Net Margin %
-    pnl["Net Margin %"] = pnl["Operating Margin %"].copy()
+    pnl["Net Margin %"] = [
+        _safe_div(net_profit[i], pnl["Revenue (Net Sales)"][i]) * 100
+        for i in range(len(months))
+    ]
 
     return pnl, sorted_ledgers
 
