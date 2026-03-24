@@ -155,27 +155,47 @@ def get_groups_by_nature(conn, nature):
                 "SELECT NAME FROM mst_group WHERE ISREVENUE='No' AND ISDEEMEDPOSITIVE='No'"
             ).fetchall()]
         elif nature == 'sales':
-            # Sales = income groups that affect gross profit
+            # Sales Accounts specifically (RESERVEDNAME distinguishes from Direct Incomes)
             groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'"
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND (RESERVEDNAME='Sales Accounts' OR RESERVEDNAME='')"
             ).fetchall()]
+            if not groups:
+                groups = [r[0] for r in conn.execute(
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'"
+                ).fetchall()]
         elif nature == 'purchase':
-            # Purchase = expense groups that affect gross profit
+            # Purchase Accounts specifically (RESERVEDNAME distinguishes from Direct Expenses)
             groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes'"
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Purchase Accounts'"
             ).fetchall()]
+            if not groups:
+                # Fallback: all gross-profit expense groups
+                groups = [r[0] for r in conn.execute(
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes'"
+                ).fetchall()]
         elif nature == 'direct_income':
+            # Direct Incomes specifically (exclude Sales Accounts and its sub-groups)
             groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'"
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Direct Incomes'"
             ).fetchall()]
+            if not groups:
+                groups = [r[0] for r in conn.execute(
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME != 'Sales Accounts' AND RESERVEDNAME != ''"
+                ).fetchall()]
         elif nature == 'indirect_income':
             groups = [r[0] for r in conn.execute(
                 "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='No'"
             ).fetchall()]
         elif nature == 'direct_expense':
+            # Direct Expenses specifically (RESERVEDNAME distinguishes from Purchase Accounts)
             groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes'"
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Direct Expenses'"
             ).fetchall()]
+            if not groups:
+                # Fallback: all gross-profit expense groups except Purchase Accounts
+                groups = [r[0] for r in conn.execute(
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME != 'Purchase Accounts'"
+                ).fetchall()]
         elif nature == 'indirect_expense':
             groups = [r[0] for r in conn.execute(
                 "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='No'"
