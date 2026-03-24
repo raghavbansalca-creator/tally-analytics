@@ -521,6 +521,25 @@ def sync_all(host, port=9000, db_path="tally_data.db", progress_callback=None):
 
     all_stats = {}
 
+    # Step 0.5: CLEAN SLATE — drop ALL tables from old company
+    # This is critical: when switching companies, stale data from the
+    # previous company (profile, training labels, cached classifications)
+    # MUST be removed to prevent conflicts.
+    try:
+        clean_conn = sqlite3.connect(db_path)
+        old_tables = [r[0] for r in clean_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        for tbl in old_tables:
+            clean_conn.execute(f"DROP TABLE IF EXISTS [{tbl}]")
+        clean_conn.commit()
+        clean_conn.close()
+        if old_tables:
+            print(f"  Cleaned {len(old_tables)} old tables: {', '.join(old_tables)}")
+    except Exception as e:
+        print(f"  Warning: Could not clean old tables: {e}")
+    print()
+
     # Step 1: Masters
     print("--- MASTER DATA ---")
     master_stats = sync_masters(host, port, db_path, progress_callback)

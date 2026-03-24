@@ -152,6 +152,34 @@ with col_sync:
                 detail_text.empty()
                 progress_bar.empty()
 
+                # CLEAN SLATE: Clear ALL caches from old company
+                # 1. Clear session state (UI cache)
+                keys_to_clear = [k for k in st.session_state.keys()
+                                 if k not in ('tally_host', 'tally_port', 'tally_connected', 'tally_company')]
+                for k in keys_to_clear:
+                    del st.session_state[k]
+
+                # 2. Clear module-level column caches
+                try:
+                    from gst_engine import clear_col_cache as gcc1
+                    gcc1()
+                except Exception:
+                    pass
+                try:
+                    from tally_reports import clear_col_cache as gcc2
+                    gcc2()
+                except Exception:
+                    pass
+                try:
+                    from analytics import clear_col_cache as gcc3
+                    gcc3()
+                except Exception:
+                    pass
+
+                # 3. Clear Streamlit's data cache
+                st.cache_data.clear()
+
+                st.session_state.tally_company = result.get('company', 'Unknown')
                 st.success(f"Sync complete! Company: **{result.get('company', 'Unknown')}**")
 
                 # Show summary
