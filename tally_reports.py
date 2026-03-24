@@ -46,18 +46,165 @@ def get_conn():
     return sqlite3.connect(DB_PATH)
 
 
-# ── TALLY GROUP CLASSIFICATION ──────────────────────────────────────────────
-# Primary groups and their Balance Sheet / P&L classification.
-# In Tally: ISREVENUE = 'Yes' means P&L group; 'No' means Balance Sheet group.
+# ── TALLY GROUP CLASSIFICATION (FLAG-BASED) ─────────────────────────────────
+# Uses Tally's own ISREVENUE + ISDEEMEDPOSITIVE flags from mst_group:
+#   ISREVENUE + ISDEEMEDPOSITIVE = Classification:
+#     Yes + No  = INCOME  (Sales, Direct/Indirect Incomes)
+#     Yes + Yes = EXPENSE (Purchases, Direct/Indirect Expenses)
+#     No  + Yes = ASSET   (Bank, Cash, Debtors, Fixed Assets, Stock)
+#     No  + No  = LIABILITY (Capital, Creditors, Loans, Duties)
 
+# Legacy hardcoded roots — kept as fallback only if mst_group has no flag columns.
 BS_ASSET_ROOTS = ["Current Assets", "Fixed Assets", "Investments", "Misc. Expenses (ASSET)"]
 BS_LIABILITY_ROOTS = ["Current Liabilities", "Loans (Liability)", "Capital Account", "Branch / Divisions", "Suspense A/c"]
 PL_INCOME_ROOTS = ["Sales Accounts", "Direct Incomes", "Indirect Incomes"]
 PL_EXPENSE_ROOTS = ["Purchase Accounts", "Direct Expenses", "Indirect Expenses"]
 
 
+def _get_recursive(conn, parent):
+    """Get parent + all descendants recursively."""
+    if not _table_exists(conn, "mst_group"):
+        return [parent]
+    result = [parent]
+    queue = [parent]
+    while queue:
+        curr = queue.pop(0)
+        try:
+            children = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE PARENT=?", (curr,)
+            ).fetchall()]
+        except sqlite3.OperationalError:
+            children = []
+        for c in children:
+            if c not in result:
+                result.append(c)
+                queue.append(c)
+    return result
+
+
+def _has_group_flags(conn):
+    """Check if mst_group has ISREVENUE and ISDEEMEDPOSITIVE columns."""
+    cols = _get_cols(conn, "mst_group")
+    return "ISREVENUE" in cols and "ISDEEMEDPOSITIVE" in cols
+
+
+def get_groups_by_nature(conn, nature):
+    """Get all group names by their financial nature using Tally's own flags.
+
+    nature: 'income', 'expense', 'asset', 'liability',
+            'sales' (subset of income), 'purchase' (subset of expense),
+            'direct_income', 'indirect_income',
+            'direct_expense', 'indirect_expense',
+            'debtors', 'creditors', 'bank', 'cash',
+            'bank_od', 'loans', 'duties_taxes',
+            'fixed_assets', 'stock', 'capital'
+
+    Returns list of group names (includes all sub-groups via Tally flags).
+    """
+    if not _table_exists(conn, "mst_group") or not _has_group_flags(conn):
+        # Fallback to hardcoded roots
+        fallback_map = {
+            'income': PL_INCOME_ROOTS,
+            'expense': PL_EXPENSE_ROOTS,
+            'asset': BS_ASSET_ROOTS,
+            'liability': BS_LIABILITY_ROOTS,
+            'sales': ["Sales Accounts"],
+            'purchase': ["Purchase Accounts"],
+            'direct_income': ["Direct Incomes"],
+            'indirect_income': ["Indirect Incomes"],
+            'direct_expense': ["Direct Expenses"],
+            'indirect_expense': ["Indirect Expenses"],
+            'debtors': ["Sundry Debtors"],
+            'creditors': ["Sundry Creditors"],
+            'bank': ["Bank Accounts"],
+            'bank_od': ["Bank OD A/c"],
+            'cash': ["Cash-in-Hand"],
+            'loans': ["Secured Loans", "Unsecured Loans", "Loans (Liability)"],
+            'duties_taxes': ["Duties & Taxes"],
+            'fixed_assets': ["Fixed Assets"],
+            'stock': ["Stock-in-Hand"],
+            'capital': ["Capital Account"],
+        }
+        roots = fallback_map.get(nature, [])
+        result = set()
+        for r in roots:
+            result.update(get_all_groups_under(conn, [r]))
+        return list(result)
+
+    try:
+        if nature == 'income':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No'"
+            ).fetchall()]
+        elif nature == 'expense':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes'"
+            ).fetchall()]
+        elif nature == 'asset':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='No' AND ISDEEMEDPOSITIVE='Yes'"
+            ).fetchall()]
+        elif nature == 'liability':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='No' AND ISDEEMEDPOSITIVE='No'"
+            ).fetchall()]
+        elif nature == 'sales':
+            # Sales = income groups that affect gross profit
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'"
+            ).fetchall()]
+        elif nature == 'purchase':
+            # Purchase = expense groups that affect gross profit
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes'"
+            ).fetchall()]
+        elif nature == 'direct_income':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'"
+            ).fetchall()]
+        elif nature == 'indirect_income':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='No'"
+            ).fetchall()]
+        elif nature == 'direct_expense':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes'"
+            ).fetchall()]
+        elif nature == 'indirect_expense':
+            groups = [r[0] for r in conn.execute(
+                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='No'"
+            ).fetchall()]
+        elif nature == 'debtors':
+            groups = _get_recursive(conn, 'Sundry Debtors')
+        elif nature == 'creditors':
+            groups = _get_recursive(conn, 'Sundry Creditors')
+        elif nature == 'bank':
+            groups = _get_recursive(conn, 'Bank Accounts')
+        elif nature == 'bank_od':
+            groups = _get_recursive(conn, 'Bank OD A/c')
+        elif nature == 'cash':
+            groups = _get_recursive(conn, 'Cash-in-Hand')
+        elif nature == 'loans':
+            groups = _get_recursive(conn, 'Secured Loans') + _get_recursive(conn, 'Unsecured Loans') + _get_recursive(conn, 'Loans (Liability)')
+            groups = list(dict.fromkeys(groups))  # deduplicate preserving order
+        elif nature == 'duties_taxes':
+            groups = _get_recursive(conn, 'Duties & Taxes')
+        elif nature == 'fixed_assets':
+            groups = _get_recursive(conn, 'Fixed Assets')
+        elif nature == 'stock':
+            groups = _get_recursive(conn, 'Stock-in-Hand')
+        elif nature == 'capital':
+            groups = _get_recursive(conn, 'Capital Account')
+        else:
+            groups = []
+    except sqlite3.OperationalError:
+        groups = []
+    return groups
+
+
 def get_all_groups_under(conn, root_groups):
-    """Get all group names that fall under any of the root groups (recursive)."""
+    """Get all group names that fall under any of the root groups (recursive).
+    NOTE: Prefer get_groups_by_nature() which uses Tally's own flags."""
     if not _table_exists(conn, "mst_group"):
         return set(root_groups)
 
@@ -293,9 +440,9 @@ def profit_and_loss(conn, from_date=None, to_date=None,
         'total_expense': float,
     }
     """
-    # Get all income and expense group names
-    income_groups = get_all_groups_under(conn, PL_INCOME_ROOTS)
-    expense_groups = get_all_groups_under(conn, PL_EXPENSE_ROOTS)
+    # Get all income and expense group names using Tally's own flags
+    income_groups = set(get_groups_by_nature(conn, 'income'))
+    expense_groups = set(get_groups_by_nature(conn, 'expense'))
 
     # If ledger_groups filter is set, narrow down to matching groups only
     if ledger_groups:
@@ -373,9 +520,9 @@ def profit_and_loss(conn, from_date=None, to_date=None,
     total_income = sum(abs(amt) for entries in income.values() for _, amt in entries)
     total_expense = sum(abs(amt) for entries in expense.values() for _, amt in entries)
 
-    # Gross profit: Direct Income - Direct Expense
-    direct_income_groups = get_all_groups_under(conn, ["Sales Accounts", "Direct Incomes"])
-    direct_expense_groups = get_all_groups_under(conn, ["Purchase Accounts", "Direct Expenses"])
+    # Gross profit: Direct Income - Direct Expense (groups that affect gross profit)
+    direct_income_groups = set(get_groups_by_nature(conn, 'direct_income'))
+    direct_expense_groups = set(get_groups_by_nature(conn, 'direct_expense'))
     gross_income = sum(abs(amt) for g, entries in income.items() if g in direct_income_groups for _, amt in entries)
     gross_expense = sum(abs(amt) for g, entries in expense.items() if g in direct_expense_groups for _, amt in entries)
 
@@ -402,8 +549,8 @@ def balance_sheet(conn, as_of_date=None, date_from=None, date_to=None):
         'total_liabilities': float,
     }
     """
-    asset_groups = get_all_groups_under(conn, BS_ASSET_ROOTS)
-    liability_groups = get_all_groups_under(conn, BS_LIABILITY_ROOTS)
+    asset_groups = set(get_groups_by_nature(conn, 'asset'))
+    liability_groups = set(get_groups_by_nature(conn, 'liability'))
 
     assets = get_ledger_totals_by_group(conn, asset_groups, as_of_date, date_from=date_from, date_to=date_to)
     liabilities = get_ledger_totals_by_group(conn, liability_groups, as_of_date, date_from=date_from, date_to=date_to)
@@ -557,11 +704,15 @@ def pl_group_drilldown(conn, group_name, from_date=None, to_date=None,
 
 def debtor_aging(conn, date_from=None, date_to=None):
     """Simple debtor aging based on closing balances from mst_ledger.
-    Groups: Sundry Debtors.
+    Groups: Sundry Debtors (recursive — includes all sub-groups).
     When date_from/date_to provided, computes opening + transactions in range."""
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
     has_cb = "CLOSINGBALANCE" in lcols
+
+    debtor_groups = get_groups_by_nature(conn, 'debtors')
+    placeholders = ",".join(["?"] * len(debtor_groups))
+    group_params = list(debtor_groups)
 
     if date_from or date_to:
         date_cond = ""
@@ -583,23 +734,23 @@ def debtor_aging(conn, date_from=None, date_to=None):
                    WHERE a.LEDGERNAME = l.NAME{date_cond}
                ), 0) as balance
         FROM mst_ledger l
-        WHERE l.PARENT = 'Sundry Debtors'
+        WHERE l.PARENT IN ({placeholders})
         ORDER BY balance
         """
         try:
-            rows = conn.execute(sql, params).fetchall()
+            rows = conn.execute(sql, params + group_params).fetchall()
         except sqlite3.OperationalError:
             rows = []
     elif has_cb:
-        sql = """
+        sql = f"""
         SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
         FROM mst_ledger
-        WHERE PARENT = 'Sundry Debtors'
+        WHERE PARENT IN ({placeholders})
           AND CAST(CLOSINGBALANCE AS REAL) != 0
         ORDER BY CAST(CLOSINGBALANCE AS REAL)
         """
         try:
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, group_params).fetchall()
         except sqlite3.OperationalError:
             rows = []
     else:
@@ -614,11 +765,11 @@ def debtor_aging(conn, date_from=None, date_to=None):
                    WHERE a.LEDGERNAME = l.NAME
                ), 0) as balance
         FROM mst_ledger l
-        WHERE l.PARENT = 'Sundry Debtors'
+        WHERE l.PARENT IN ({placeholders})
         ORDER BY balance
         """
         try:
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, group_params).fetchall()
         except sqlite3.OperationalError:
             rows = []
 
@@ -627,10 +778,15 @@ def debtor_aging(conn, date_from=None, date_to=None):
 
 def creditor_aging(conn, date_from=None, date_to=None):
     """Simple creditor listing based on closing balances.
+    Recursive — includes all sub-groups under Sundry Creditors.
     When date_from/date_to provided, computes opening + transactions in range."""
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
     has_cb = "CLOSINGBALANCE" in lcols
+
+    creditor_groups = get_groups_by_nature(conn, 'creditors')
+    placeholders = ",".join(["?"] * len(creditor_groups))
+    group_params = list(creditor_groups)
 
     if date_from or date_to:
         date_cond = ""
@@ -652,23 +808,23 @@ def creditor_aging(conn, date_from=None, date_to=None):
                    WHERE a.LEDGERNAME = l.NAME{date_cond}
                ), 0) as balance
         FROM mst_ledger l
-        WHERE l.PARENT = 'Sundry Creditors'
+        WHERE l.PARENT IN ({placeholders})
         ORDER BY balance
         """
         try:
-            rows = conn.execute(sql, params).fetchall()
+            rows = conn.execute(sql, params + group_params).fetchall()
         except sqlite3.OperationalError:
             rows = []
     elif has_cb:
-        sql = """
+        sql = f"""
         SELECT NAME, CAST(CLOSINGBALANCE AS REAL) as balance
         FROM mst_ledger
-        WHERE PARENT = 'Sundry Creditors'
+        WHERE PARENT IN ({placeholders})
           AND CAST(CLOSINGBALANCE AS REAL) != 0
         ORDER BY CAST(CLOSINGBALANCE AS REAL)
         """
         try:
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, group_params).fetchall()
         except sqlite3.OperationalError:
             rows = []
     else:
@@ -682,11 +838,11 @@ def creditor_aging(conn, date_from=None, date_to=None):
                    WHERE a.LEDGERNAME = l.NAME
                ), 0) as balance
         FROM mst_ledger l
-        WHERE l.PARENT = 'Sundry Creditors'
+        WHERE l.PARENT IN ({placeholders})
         ORDER BY balance
         """
         try:
-            rows = conn.execute(sql).fetchall()
+            rows = conn.execute(sql, group_params).fetchall()
         except sqlite3.OperationalError:
             rows = []
 

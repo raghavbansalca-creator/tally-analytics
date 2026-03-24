@@ -11,6 +11,9 @@ from collections import defaultdict
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 
+# Import flag-based group classification
+from tally_reports import get_groups_by_nature
+
 # ── SHARED DEFENSIVE UTILITIES ────────────────────────────────────────────
 _TABLE_COLS = {}
 
@@ -42,6 +45,47 @@ def _safe_fetchone_val(cur, default=0):
     if row is None or row[0] is None:
         return default
     return row[0]
+
+
+def _get_all_groups_under(conn, root_groups):
+    """Recursively get all group names under any of the root groups (inclusive).
+    E.g., _get_all_groups_under(conn, ['Sales Accounts']) returns
+    ['Sales Accounts', 'SALE OFFLINE', 'SALES ONLINE', ...]
+    """
+    if not _table_exists(conn, "mst_group"):
+        return list(root_groups) if isinstance(root_groups, (list, tuple)) else [root_groups]
+    if isinstance(root_groups, str):
+        root_groups = [root_groups]
+    result = []
+    queue = list(root_groups)
+    while queue:
+        current = queue.pop(0)
+        if current not in result:
+            result.append(current)
+            try:
+                children = conn.execute(
+                    "SELECT NAME FROM mst_group WHERE PARENT = ?", (current,)
+                ).fetchall()
+            except Exception:
+                children = []
+            for (child,) in children:
+                if child and child not in result:
+                    queue.append(child)
+    return result
+
+
+def _group_placeholders(conn, root_groups):
+    """Return (placeholders_sql, group_list) for use in IN clauses."""
+    groups = _get_all_groups_under(conn, root_groups)
+    return ",".join(["?"] * len(groups)), groups
+
+
+def _nature_placeholders(conn, nature):
+    """Return (placeholders_sql, group_list) using Tally's own flag-based classification."""
+    groups = get_groups_by_nature(conn, nature)
+    if not groups:
+        return "'__NONE__'", []
+    return ",".join(["?"] * len(groups)), groups
 
 
 def _detect_receipt_payment_types(conn):
@@ -116,6 +160,7 @@ def monthly_sales(conn, date_from=None, date_to=None, voucher_types=None):
         ph = ",".join(["?"] * len(voucher_types))
         date_filter += f" AND v.VOUCHERTYPENAME IN ({ph})"
         params.extend(voucher_types)
+    sales_ph, sales_groups = _nature_placeholders(conn, 'sales')
     try:
         return conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
@@ -124,9 +169,9 @@ def monthly_sales(conn, date_from=None, date_to=None, voucher_types=None):
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Sales Accounts'{date_filter}
+            WHERE l.PARENT IN ({sales_ph}){date_filter}
             GROUP BY month ORDER BY month
-        """, params).fetchall()
+        """, sales_groups + params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -149,6 +194,7 @@ def monthly_purchases(conn, date_from=None, date_to=None, voucher_types=None):
         ph = ",".join(["?"] * len(voucher_types))
         date_filter += f" AND v.VOUCHERTYPENAME IN ({ph})"
         params.extend(voucher_types)
+    purch_ph, purch_groups = _nature_placeholders(conn, 'purchase')
     try:
         return conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
@@ -157,9 +203,9 @@ def monthly_purchases(conn, date_from=None, date_to=None, voucher_types=None):
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Purchase Accounts'{date_filter}
+            WHERE l.PARENT IN ({purch_ph}){date_filter}
             GROUP BY month ORDER BY month
-        """, params).fetchall()
+        """, purch_groups + params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -237,6 +283,7 @@ def monthly_expenses(conn, date_from=None, date_to=None, voucher_types=None):
         ph = ",".join(["?"] * len(voucher_types))
         date_filter += f" AND v.VOUCHERTYPENAME IN ({ph})"
         params.extend(voucher_types)
+    ie_ph, ie_groups = _nature_placeholders(conn, 'indirect_expense')
     try:
         return conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
@@ -245,10 +292,10 @@ def monthly_expenses(conn, date_from=None, date_to=None, voucher_types=None):
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0{date_filter}
+            WHERE l.PARENT IN ({ie_ph}) AND CAST(a.AMOUNT AS REAL) < 0{date_filter}
             GROUP BY month, a.LEDGERNAME
             ORDER BY month, amt DESC
-        """, params).fetchall()
+        """, ie_groups + params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -279,6 +326,7 @@ def monthly_gross_profit(conn, date_from=None, date_to=None, voucher_types=None)
         ph = ",".join(["?"] * len(voucher_types))
         date_filter += f" AND v.VOUCHERTYPENAME IN ({ph})"
         _params.extend(voucher_types)
+    ie_ph2, ie_groups2 = _nature_placeholders(conn, 'indirect_expense')
     try:
         exp_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
@@ -286,9 +334,9 @@ def monthly_gross_profit(conn, date_from=None, date_to=None, voucher_types=None)
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0{date_filter}
+            WHERE l.PARENT IN ({ie_ph2}) AND CAST(a.AMOUNT AS REAL) < 0{date_filter}
             GROUP BY month ORDER BY month
-        """, _params).fetchall()
+        """, ie_groups2 + _params).fetchall()
     except sqlite3.OperationalError:
         exp_rows = []
     expenses = {r[0]: r[1] for r in exp_rows if r[0] and r[1]}
@@ -340,6 +388,7 @@ def top_customers_by_sales(conn, limit=15, date_from=None, date_to=None,
         date_filter += f" AND v.VOUCHERTYPENAME IN ({ph})"
         params.extend(voucher_types)
     params.append(limit)
+    s_ph, s_groups = _nature_placeholders(conn, 'sales')
     try:
         return conn.execute(f"""
             SELECT v.PARTYLEDGERNAME as party,
@@ -348,10 +397,10 @@ def top_customers_by_sales(conn, limit=15, date_from=None, date_to=None,
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Sales Accounts'
+            WHERE l.PARENT IN ({s_ph})
               AND v.PARTYLEDGERNAME IS NOT NULL AND v.PARTYLEDGERNAME != ''{date_filter}
             GROUP BY party ORDER BY total_sales DESC LIMIT ?
-        """, params).fetchall()
+        """, s_groups + params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -380,6 +429,7 @@ def top_suppliers_by_purchase(conn, limit=15, date_from=None, date_to=None,
         date_filter += f" AND v.VOUCHERTYPENAME IN ({ph})"
         params.extend(voucher_types)
     params.append(limit)
+    p_ph, p_groups = _nature_placeholders(conn, 'purchase')
     try:
         return conn.execute(f"""
             SELECT v.PARTYLEDGERNAME as party,
@@ -388,10 +438,10 @@ def top_suppliers_by_purchase(conn, limit=15, date_from=None, date_to=None,
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Purchase Accounts'
+            WHERE l.PARENT IN ({p_ph})
               AND v.PARTYLEDGERNAME IS NOT NULL AND v.PARTYLEDGERNAME != ''{date_filter}
             GROUP BY party ORDER BY total_purchases DESC LIMIT ?
-        """, params).fetchall()
+        """, p_groups + params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -412,6 +462,7 @@ def customer_monthly_sales(conn, top_n=5, date_from=None, date_to=None):
         date_filter += " AND v.DATE <= ?"
         params_extra.append(date_to)
 
+    s_ph, s_groups = _nature_placeholders(conn, 'sales')
     result = {}
     for name in top_names:
         try:
@@ -421,9 +472,9 @@ def customer_monthly_sales(conn, top_n=5, date_from=None, date_to=None):
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-                WHERE l.PARENT = 'Sales Accounts' AND v.PARTYLEDGERNAME = ?{date_filter}
+                WHERE l.PARENT IN ({s_ph}) AND v.PARTYLEDGERNAME = ?{date_filter}
                 GROUP BY month ORDER BY month
-            """, [name] + params_extra).fetchall()
+            """, s_groups + [name] + params_extra).fetchall()
             result[name] = {r[0]: r[1] for r in rows}
         except sqlite3.OperationalError:
             result[name] = {}
@@ -437,6 +488,10 @@ def bank_balances(conn, date_from=None, date_to=None):
     lcols = _get_cols(conn, "mst_ledger")
     has_ob = "OPENINGBALANCE" in lcols
     has_cb = "CLOSINGBALANCE" in lcols
+
+    _bank_all = get_groups_by_nature(conn, 'bank') + get_groups_by_nature(conn, 'bank_od') + get_groups_by_nature(conn, 'cash')
+    bank_groups = list(dict.fromkeys(_bank_all))
+    bank_ph = ",".join(["?"] * len(bank_groups)) if bank_groups else "'__NONE__'"
 
     if date_from or date_to:
         date_cond = ""
@@ -460,22 +515,22 @@ def bank_balances(conn, date_from=None, date_to=None):
                            WHERE a.LEDGERNAME = l.NAME{date_cond}
                        ), 0) as closing
                 FROM mst_ledger l
-                WHERE l.PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+                WHERE l.PARENT IN ({bank_ph})
                 ORDER BY ABS(closing) DESC
-            """, params).fetchall()
+            """, params + bank_groups).fetchall()
         except sqlite3.OperationalError:
             return []
 
     if has_cb:
         try:
-            return conn.execute("""
+            return conn.execute(f"""
                 SELECT NAME, PARENT,
                        CAST(OPENINGBALANCE AS REAL) as opening,
                        CAST(CLOSINGBALANCE AS REAL) as closing
                 FROM mst_ledger
-                WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+                WHERE PARENT IN ({bank_ph})
                 ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
-            """).fetchall()
+            """, bank_groups).fetchall()
         except sqlite3.OperationalError:
             return []
     else:
@@ -492,9 +547,9 @@ def bank_balances(conn, date_from=None, date_to=None):
                            WHERE a.LEDGERNAME = l.NAME
                        ), 0) as closing
                 FROM mst_ledger l
-                WHERE l.PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+                WHERE l.PARENT IN ({bank_ph})
                 ORDER BY ABS(closing) DESC
-            """).fetchall()
+            """, bank_groups).fetchall()
         except sqlite3.OperationalError:
             return []
 
@@ -509,6 +564,9 @@ def monthly_bank_movement(conn, date_from=None, date_to=None):
     if date_to:
         date_filter += " AND v.DATE <= ?"
         params.append(date_to)
+    _bm_all = get_groups_by_nature(conn, 'bank') + get_groups_by_nature(conn, 'bank_od')
+    bm_groups = list(dict.fromkeys(_bm_all))
+    bm_ph = ",".join(["?"] * len(bm_groups)) if bm_groups else "'__NONE__'"
     try:
         return conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
@@ -518,10 +576,10 @@ def monthly_bank_movement(conn, date_from=None, date_to=None):
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT IN ('Bank Accounts', 'Bank OD A/c'){date_filter}
+            WHERE l.PARENT IN ({bm_ph}){date_filter}
             GROUP BY month, a.LEDGERNAME
             ORDER BY month
-        """, params).fetchall()
+        """, bm_groups + params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -529,25 +587,8 @@ def monthly_bank_movement(conn, date_from=None, date_to=None):
 # ── CASH FLOW STATEMENT ────────────────────────────────────────────────────
 
 def _safe_sum_by_group(conn, parent_group, month):
-    """Safely get sum of amounts for a ledger group in a month."""
-    try:
-        row = conn.execute("""
-            SELECT SUM(CAST(a.AMOUNT AS REAL))
-            FROM trn_voucher v
-            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-            JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = ? AND SUBSTR(v.DATE,1,6) = ?
-        """, (parent_group, month)).fetchone()
-        return (row[0] or 0) if row else 0
-    except sqlite3.OperationalError:
-        return 0
-
-
-def _safe_sum_by_groups(conn, parent_groups, month):
-    """Safely get sum of amounts for multiple ledger groups in a month."""
-    if not parent_groups:
-        return 0
-    ph = ",".join(["?"] * len(parent_groups))
+    """Safely get sum of amounts for a ledger group in a month (recursive sub-groups)."""
+    ph, groups = _group_placeholders(conn, [parent_group])
     try:
         row = conn.execute(f"""
             SELECT SUM(CAST(a.AMOUNT AS REAL))
@@ -555,7 +596,25 @@ def _safe_sum_by_groups(conn, parent_groups, month):
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
             WHERE l.PARENT IN ({ph}) AND SUBSTR(v.DATE,1,6) = ?
-        """, list(parent_groups) + [month]).fetchone()
+        """, groups + [month]).fetchone()
+        return (row[0] or 0) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
+def _safe_sum_by_groups(conn, parent_groups, month):
+    """Safely get sum of amounts for multiple ledger groups in a month (recursive sub-groups)."""
+    if not parent_groups:
+        return 0
+    ph, groups = _group_placeholders(conn, list(parent_groups))
+    try:
+        row = conn.execute(f"""
+            SELECT SUM(CAST(a.AMOUNT AS REAL))
+            FROM trn_voucher v
+            JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
+            JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
+            WHERE l.PARENT IN ({ph}) AND SUBSTR(v.DATE,1,6) = ?
+        """, groups + [month]).fetchone()
         return (row[0] or 0) if row else 0
     except sqlite3.OperationalError:
         return 0
@@ -745,12 +804,17 @@ def working_capital_analysis(conn, date_from=None, date_to=None):
     cl_groups = ['Sundry Creditors', 'Duties & Taxes', 'Provisions']
 
     def _get_group_balance(group_name):
+        """Get balance for a group including all recursive sub-groups."""
+        all_groups = _get_all_groups_under(conn, [group_name])
+        if not all_groups:
+            return 0
+        ph = ",".join(["?"] * len(all_groups))
         if has_cb:
             try:
-                row = conn.execute("""
+                row = conn.execute(f"""
                     SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
-                    FROM mst_ledger WHERE PARENT = ?
-                """, (group_name,)).fetchone()
+                    FROM mst_ledger WHERE PARENT IN ({ph})
+                """, list(all_groups)).fetchone()
                 return (row[0] or 0) if row else 0
             except sqlite3.OperationalError:
                 return 0
@@ -765,8 +829,8 @@ def working_capital_analysis(conn, date_from=None, date_to=None):
                         COALESCE((SELECT SUM(CAST(a.AMOUNT AS REAL))
                                   FROM trn_accounting a WHERE a.LEDGERNAME = l.NAME), 0)
                     )), 0)
-                    FROM mst_ledger l WHERE l.PARENT = ?
-                """, (group_name,)).fetchone()
+                    FROM mst_ledger l WHERE l.PARENT IN ({ph})
+                """, list(all_groups)).fetchone()
                 return (row[0] or 0) if row else 0
             except sqlite3.OperationalError:
                 return 0
@@ -820,18 +884,20 @@ def key_ratios(conn, date_from=None, date_to=None):
     total_assets = bs.get("total_assets", 0) or 0
     total_liabilities = bs.get("total_liabilities", 0) or 0
 
-    # Debtor/creditor balances
+    # Debtor/creditor balances (recursive sub-groups)
     lcols = _get_cols(conn, "mst_ledger")
     if "CLOSINGBALANCE" in lcols:
         try:
-            total_debtors = _safe_fetchone_val(conn.execute("""
+            d_ph, d_groups = _nature_placeholders(conn, 'debtors')
+            total_debtors = _safe_fetchone_val(conn.execute(f"""
                 SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
-                FROM mst_ledger WHERE PARENT = 'Sundry Debtors'
-            """))
-            total_creditors = _safe_fetchone_val(conn.execute("""
+                FROM mst_ledger WHERE PARENT IN ({d_ph})
+            """, d_groups))
+            c_ph, c_groups = _nature_placeholders(conn, 'creditors')
+            total_creditors = _safe_fetchone_val(conn.execute(f"""
                 SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
-                FROM mst_ledger WHERE PARENT = 'Sundry Creditors'
-            """))
+                FROM mst_ledger WHERE PARENT IN ({c_ph})
+            """, c_groups))
         except sqlite3.OperationalError:
             total_debtors = 0
             total_creditors = 0
@@ -912,35 +978,41 @@ def collection_efficiency(conn, date_from=None, date_to=None):
 # ── DRILL-DOWN QUERIES ─────────────────────────────────────────────────────
 
 def drill_monthly_invoices(conn, month_code, ledger_parent):
-    """Get all invoices for a given month and ledger parent (Sales Accounts / Purchase Accounts)."""
+    """Get all invoices for a given month and ledger parent (Sales Accounts / Purchase Accounts).
+    Includes all recursive sub-groups."""
+    all_groups = _get_all_groups_under(conn, [ledger_parent])
+    ph = ",".join(["?"] * len(all_groups))
     try:
-        return conn.execute("""
+        return conn.execute(f"""
             SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME,
                    SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = ? AND SUBSTR(v.DATE,1,6) = ?
+            WHERE l.PARENT IN ({ph}) AND SUBSTR(v.DATE,1,6) = ?
             GROUP BY v.GUID
             ORDER BY v.DATE
-        """, (ledger_parent, month_code)).fetchall()
+        """, list(all_groups) + [month_code]).fetchall()
     except sqlite3.OperationalError:
         return []
 
 
 def drill_party_invoices(conn, party_name, ledger_parent):
-    """Get all invoices for a specific party under a ledger parent."""
+    """Get all invoices for a specific party under a ledger parent.
+    Includes all recursive sub-groups."""
+    all_groups = _get_all_groups_under(conn, [ledger_parent])
+    ph = ",".join(["?"] * len(all_groups))
     try:
-        return conn.execute("""
+        return conn.execute(f"""
             SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.VOUCHERTYPENAME,
                    SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = ? AND v.PARTYLEDGERNAME = ?
+            WHERE l.PARENT IN ({ph}) AND v.PARTYLEDGERNAME = ?
             GROUP BY v.GUID
             ORDER BY v.DATE
-        """, (ledger_parent, party_name)).fetchall()
+        """, list(all_groups) + [party_name]).fetchall()
     except sqlite3.OperationalError:
         return []
 

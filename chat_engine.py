@@ -14,13 +14,21 @@ import logging
 from tally_reports import (
     get_conn, trial_balance, profit_and_loss, balance_sheet,
     ledger_detail, pl_group_drilldown, debtor_aging, creditor_aging,
-    voucher_summary, search_ledger,
+    voucher_summary, search_ledger, get_all_groups_under,
 )
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+
+def _group_ph(conn, root_groups):
+    """Return (placeholders_sql, group_list) for recursive group queries."""
+    if isinstance(root_groups, str):
+        root_groups = [root_groups]
+    groups = list(get_all_groups_under(conn, root_groups))
+    return ",".join(["?"] * len(groups)), groups
 
 
 def _has_table(conn_or_path, table_name):
@@ -211,12 +219,13 @@ def _build_data_context(question):
             try:
                 has_closing = _has_column(conn, "mst_ledger", "CLOSINGBALANCE")
                 if has_closing:
-                    rows = conn.execute("""
+                    _bk_ph, _bk_g = _group_ph(conn, ["Bank Accounts", "Bank OD A/c", "Cash-in-Hand"])
+                    rows = conn.execute(f"""
                         SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as bal
                         FROM mst_ledger
-                        WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+                        WHERE PARENT IN ({_bk_ph})
                         ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
-                    """).fetchall()
+                    """, _bk_g).fetchall()
                     rows = rows or []
                     lines = ["BANK & CASH BALANCES:"]
                     for name, parent, bal in rows:
@@ -1017,12 +1026,13 @@ def smart_answer(question):
                                    "how much cash", "money in my bank", "cash balance",
                                    "cash position", "cash available", "bank position",
                                    "cash in hand", "cash on hand"]):
-            rows = conn.execute("""
+            _bk2_ph, _bk2_g = _group_ph(conn, ["Bank Accounts", "Bank OD A/c", "Cash-in-Hand"])
+            rows = conn.execute(f"""
                 SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL) as bal
                 FROM mst_ledger
-                WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+                WHERE PARENT IN ({_bk2_ph})
                 ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
-            """).fetchall()
+            """, _bk2_g).fetchall()
             total = sum(abs(r[2] or 0) for r in rows)
             lines = [f"**Cash & Bank Position ({_get_company_name()})**\n"]
             lines.append(f"**Total Available: {_fmt_indian(total)}**\n")
@@ -1436,15 +1446,16 @@ def smart_answer(question):
         # Month-specific expenses
         if month_code and any(kw in q for kw in ["expense", "spend", "cost"]):
             month_name = _month_full(month_code)
-            rows = conn.execute("""
+            _ie_ph, _ie_g = _group_ph(conn, ["Indirect Expenses"])
+            rows = conn.execute(f"""
                 SELECT a.LEDGERNAME, SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-                WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0
+                WHERE l.PARENT IN ({_ie_ph}) AND CAST(a.AMOUNT AS REAL) < 0
                   AND SUBSTR(v.DATE,1,6) = ?
                 GROUP BY a.LEDGERNAME ORDER BY amt DESC
-            """, (month_code,)).fetchall()
+            """, _ie_g + [month_code]).fetchall()
             if rows:
                 total = sum(r[1] for r in rows)
                 lines = [f"**Expenses in {month_name}:**\n"]
@@ -1641,20 +1652,22 @@ def smart_answer(question):
                 match = _fuzzy_match_party(conn, entity)
                 if match:
                     name = match[0]
-                    # Total sales with this party
-                    sales_total = conn.execute("""
+                    # Total sales with this party (recursive sub-groups)
+                    _sp, _sg = _group_ph(conn, ["Sales Accounts"])
+                    sales_total = conn.execute(f"""
                         SELECT COUNT(DISTINCT v.GUID), COALESCE(SUM(ABS(CAST(a.AMOUNT AS REAL))), 0)
                         FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-                        WHERE v.PARTYLEDGERNAME = ? AND l.PARENT = 'Sales Accounts'
-                    """, (name,)).fetchone()
-                    # Total purchases
-                    purch_total = conn.execute("""
+                        WHERE v.PARTYLEDGERNAME = ? AND l.PARENT IN ({_sp})
+                    """, [name] + _sg).fetchone()
+                    # Total purchases (recursive sub-groups)
+                    _pp, _pg = _group_ph(conn, ["Purchase Accounts"])
+                    purch_total = conn.execute(f"""
                         SELECT COUNT(DISTINCT v.GUID), COALESCE(SUM(ABS(CAST(a.AMOUNT AS REAL))), 0)
                         FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-                        WHERE v.PARTYLEDGERNAME = ? AND l.PARENT = 'Purchase Accounts'
-                    """, (name,)).fetchone()
+                        WHERE v.PARTYLEDGERNAME = ? AND l.PARENT IN ({_pp})
+                    """, [name] + _pg).fetchone()
                     # Total all vouchers
                     all_vch = conn.execute("""
                         SELECT COUNT(DISTINCT GUID) FROM trn_voucher WHERE PARTYLEDGERNAME = ?
@@ -1798,14 +1811,15 @@ def smart_answer(question):
             total_count = sum(r[1] for r in data) if data else 0
             avg = total_amt / total_count if total_count else 0
             # Find highest and lowest invoice
-            highest = conn.execute("""
+            _sp2, _sg2 = _group_ph(conn, ["Sales Accounts"])
+            highest = conn.execute(f"""
                 SELECT v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.DATE,
                        SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-                WHERE l.PARENT = 'Sales Accounts'
+                WHERE l.PARENT IN ({_sp2})
                 GROUP BY v.GUID ORDER BY amt DESC LIMIT 1
-            """).fetchone()
+            """, _sg2).fetchone()
             lines = [f"**Sales Invoice Analysis:**\n"]
             lines.append(f"- **Total Sales:** {_fmt_indian(total_amt)}")
             lines.append(f"- **Number of Invoices:** {total_count}")
@@ -1817,14 +1831,15 @@ def smart_answer(question):
         if any(kw in q for kw in ["highest invoice", "biggest invoice", "largest invoice",
                                    "highest single", "biggest single", "largest single",
                                    "highest sale"]):
-            row = conn.execute("""
+            _sp3, _sg3 = _group_ph(conn, ["Sales Accounts"])
+            row = conn.execute(f"""
                 SELECT v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.DATE,
                        SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
                 FROM trn_voucher v JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
                 JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-                WHERE l.PARENT = 'Sales Accounts'
+                WHERE l.PARENT IN ({_sp3})
                 GROUP BY v.GUID ORDER BY amt DESC LIMIT 1
-            """).fetchone()
+            """, _sg3).fetchone()
             if row:
                 dt_fmt = f"{row[2][6:8]}/{row[2][4:6]}/{row[2][:4]}" if row[2] and len(row[2]) == 8 else row[2]
                 return (f"**Highest Single Sales Invoice:**\n\n"
@@ -1836,7 +1851,8 @@ def smart_answer(question):
         if any(kw in q for kw in ["how many customer", "how many buyer",
                                    "customer count", "number of customer",
                                    "total customer", "how many parties"]):
-            row = conn.execute("SELECT COUNT(*) FROM mst_ledger WHERE PARENT = 'Sundry Debtors'").fetchone()
+            _dp, _dg = _group_ph(conn, ["Sundry Debtors"])
+            row = conn.execute(f"SELECT COUNT(*) FROM mst_ledger WHERE PARENT IN ({_dp})", _dg).fetchone()
             debtor_count = row[0] if row else 0
             active = conn.execute("""
                 SELECT COUNT(DISTINCT PARTYLEDGERNAME) FROM trn_voucher
@@ -1852,7 +1868,8 @@ def smart_answer(question):
         if any(kw in q for kw in ["how many supplier", "how many vendor",
                                    "supplier count", "number of supplier",
                                    "total supplier"]):
-            row = conn.execute("SELECT COUNT(*) FROM mst_ledger WHERE PARENT = 'Sundry Creditors'").fetchone()
+            _cp, _cg = _group_ph(conn, ["Sundry Creditors"])
+            row = conn.execute(f"SELECT COUNT(*) FROM mst_ledger WHERE PARENT IN ({_cp})", _cg).fetchone()
             creditor_count = row[0] if row else 0
             active = conn.execute("""
                 SELECT COUNT(DISTINCT PARTYLEDGERNAME) FROM trn_voucher

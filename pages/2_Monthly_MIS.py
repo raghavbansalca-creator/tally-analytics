@@ -15,6 +15,7 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sidebar_filters import render_sidebar_filters
+from tally_reports import get_groups_by_nature
 
 # ── PAGE CONFIG ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Monthly MIS — SLV", page_icon="M", layout="wide")
@@ -50,6 +51,46 @@ def _safe_cols(conn, table):
         return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     except Exception:
         return set()
+
+
+def _get_all_groups_under(conn, root_groups):
+    """Recursively get all group names under any of the root groups (inclusive)."""
+    if isinstance(root_groups, str):
+        root_groups = [root_groups]
+    try:
+        conn.execute("SELECT 1 FROM mst_group LIMIT 1")
+    except Exception:
+        return list(root_groups)
+    result = []
+    queue = list(root_groups)
+    while queue:
+        current = queue.pop(0)
+        if current not in result:
+            result.append(current)
+            try:
+                children = conn.execute(
+                    "SELECT NAME FROM mst_group WHERE PARENT = ?", (current,)
+                ).fetchall()
+            except Exception:
+                children = []
+            for (child,) in children:
+                if child and child not in result:
+                    queue.append(child)
+    return result
+
+
+def _group_ph(conn, root_groups):
+    """Return (placeholders_sql, group_list) for use in IN clauses."""
+    groups = _get_all_groups_under(conn, root_groups)
+    return ",".join(["?"] * len(groups)), groups
+
+
+def _nature_ph(conn, nature):
+    """Return (placeholders_sql, group_list) using Tally's own flag-based classification."""
+    groups = get_groups_by_nature(conn, nature)
+    if not groups:
+        return "'__NONE__'", []
+    return ",".join(["?"] * len(groups)), groups
 
 # ── GLOBAL DATE FILTER ──
 _conn_dates = sqlite3.connect(DB_PATH)
@@ -221,6 +262,12 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
         _vp = list(voucher_types_tuple)
         _vf = " AND v.VOUCHERTYPENAME IN (" + ",".join(["?"] * len(_vp)) + ")"
 
+    # Resolve groups using Tally's own flag-based classification
+    _s_ph, _s_g = _nature_ph(conn, 'sales')
+    _p_ph, _p_g = _nature_ph(conn, 'purchase')
+    _de_ph, _de_g = _nature_ph(conn, 'direct_expense')
+    _ie_ph, _ie_g = _nature_ph(conn, 'indirect_expense')
+
     # Monthly Sales
     rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
@@ -229,9 +276,9 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Sales Accounts'{_df}{_vf}
+        WHERE l.PARENT IN ({_s_ph}){_df}{_vf}
         GROUP BY month ORDER BY month
-    """, _dp + _vp).fetchall()
+    """, _s_g + _dp + _vp).fetchall()
     data["sales"] = {r[0]: {"count": r[1], "amount": r[2]} for r in rows}
 
     # Monthly Purchases
@@ -242,9 +289,9 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Purchase Accounts'{_df}{_vf}
+        WHERE l.PARENT IN ({_p_ph}){_df}{_vf}
         GROUP BY month ORDER BY month
-    """, _dp + _vp).fetchall()
+    """, _p_g + _dp + _vp).fetchall()
     data["purchases"] = {r[0]: {"count": r[1], "amount": r[2]} for r in rows}
 
     # Monthly Direct Expenses (Freight)
@@ -255,9 +302,9 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Direct Expenses' AND CAST(a.AMOUNT AS REAL) < 0{_df}{_vf}
+        WHERE l.PARENT IN ({_de_ph}) AND CAST(a.AMOUNT AS REAL) < 0{_df}{_vf}
         GROUP BY month, a.LEDGERNAME ORDER BY month
-    """, _dp + _vp).fetchall()
+    """, _de_g + _dp + _vp).fetchall()
     direct_exp = defaultdict(lambda: defaultdict(float))
     for r in rows:
         direct_exp[r[0]][r[1]] = r[2]
@@ -271,10 +318,10 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Indirect Expenses' AND CAST(a.AMOUNT AS REAL) < 0{_df}{_vf}
+        WHERE l.PARENT IN ({_ie_ph}) AND CAST(a.AMOUNT AS REAL) < 0{_df}{_vf}
         GROUP BY month, a.LEDGERNAME
         ORDER BY month, amt DESC
-    """, _dp + _vp).fetchall()
+    """, _ie_g + _dp + _vp).fetchall()
     indirect_exp = defaultdict(lambda: defaultdict(float))
     all_expense_ledgers = set()
     for r in rows:
@@ -328,29 +375,37 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Sales Accounts'
+        WHERE l.PARENT IN ({_s_ph})
           AND v.PARTYLEDGERNAME IS NOT NULL AND v.PARTYLEDGERNAME != ''{_df}
         GROUP BY party ORDER BY total_sales DESC LIMIT 5
-    """, _dp).fetchall()
+    """, _s_g + _dp).fetchall()
     data["top5_customers"] = top5
 
-    # Bank/Cash balances
-    rows = conn.execute("""
+    # Bank/Cash balances (flag-based sub-groups)
+    _bk_groups = get_groups_by_nature(conn, 'bank') + get_groups_by_nature(conn, 'bank_od') + get_groups_by_nature(conn, 'cash')
+    _bk_groups = list(dict.fromkeys(_bk_groups))  # deduplicate
+    _bk_ph = ",".join(["?"] * len(_bk_groups)) if _bk_groups else "'__NONE__'"
+    _bk_g = _bk_groups
+    rows = conn.execute(f"""
         SELECT NAME, PARENT,
                CAST(OPENINGBALANCE AS REAL) as opening,
                CAST(CLOSINGBALANCE AS REAL) as closing
         FROM mst_ledger
-        WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c', 'Cash-in-Hand')
+        WHERE PARENT IN ({_bk_ph})
         ORDER BY ABS(CAST(CLOSINGBALANCE AS REAL)) DESC
-    """).fetchall()
+    """, _bk_g).fetchall()
     data["bank_balances"] = rows
 
-    # Debtors & Creditors closing
+    # Debtors & Creditors closing (flag-based sub-groups)
+    _d_ph, _d_g = _nature_ph(conn, 'debtors')
+    _c_ph, _c_g = _nature_ph(conn, 'creditors')
     data["total_debtors"] = conn.execute(
-        "SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0) FROM mst_ledger WHERE PARENT='Sundry Debtors'"
+        f"SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_d_ph})",
+        _d_g
     ).fetchone()[0]
     data["total_creditors"] = conn.execute(
-        "SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0) FROM mst_ledger WHERE PARENT='Sundry Creditors'"
+        f"SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0) FROM mst_ledger WHERE PARENT IN ({_c_ph})",
+        _c_g
     ).fetchone()[0]
 
     conn.close()
@@ -378,15 +433,16 @@ def month_label(m):
 def drill_revenue(month_code):
     """Get all sales invoices for a specific month."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
+    s_ph, s_g = _nature_ph(conn, 'sales')
+    rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Sales Accounts' AND SUBSTR(v.DATE,1,6) = ?
+        WHERE l.PARENT IN ({s_ph}) AND SUBSTR(v.DATE,1,6) = ?
         GROUP BY v.GUID ORDER BY v.DATE
-    """, (month_code,)).fetchall()
+    """, s_g + [month_code]).fetchall()
     conn.close()
     df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Party", "Narration", "Amount"])
     return df
@@ -395,15 +451,16 @@ def drill_revenue(month_code):
 def drill_purchases(month_code):
     """Get all purchase bills for a specific month."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
+    p_ph, p_g = _nature_ph(conn, 'purchase')
+    rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Purchase Accounts' AND SUBSTR(v.DATE,1,6) = ?
+        WHERE l.PARENT IN ({p_ph}) AND SUBSTR(v.DATE,1,6) = ?
         GROUP BY v.GUID ORDER BY v.DATE
-    """, (month_code,)).fetchall()
+    """, p_g + [month_code]).fetchall()
     conn.close()
     df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Party", "Narration", "Amount"])
     return df
@@ -428,15 +485,16 @@ def drill_expense(ledger_name, month_code):
 def drill_direct_expense(month_code):
     """Get all direct expense transactions for a month."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
+    de_ph, de_g = _nature_ph(conn, 'direct_expense')
+    rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.VOUCHERTYPENAME, a.LEDGERNAME, v.PARTYLEDGERNAME, v.NARRATION,
                ABS(CAST(a.AMOUNT AS REAL)) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Direct Expenses' AND SUBSTR(v.DATE,1,6) = ? AND CAST(a.AMOUNT AS REAL) < 0
+        WHERE l.PARENT IN ({de_ph}) AND SUBSTR(v.DATE,1,6) = ? AND CAST(a.AMOUNT AS REAL) < 0
         ORDER BY v.DATE
-    """, (month_code,)).fetchall()
+    """, de_g + [month_code]).fetchall()
     conn.close()
     df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Type", "Ledger", "Party", "Narration", "Amount"])
     return df
@@ -467,17 +525,18 @@ def drill_gross_profit(month_code, data):
 def drill_customer_invoices(party_name):
     """Get all invoices for a specific customer."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
+    s_ph, s_g = _nature_ph(conn, 'sales')
+    rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, SUBSTR(v.DATE,1,6) as month,
                v.NARRATION,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Sales Accounts'
+        WHERE l.PARENT IN ({s_ph})
           AND v.PARTYLEDGERNAME = ?
         GROUP BY v.GUID ORDER BY v.DATE
-    """, (party_name,)).fetchall()
+    """, s_g + [party_name]).fetchall()
     conn.close()
     df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Month", "Narration", "Amount"])
     return df
@@ -486,15 +545,16 @@ def drill_customer_invoices(party_name):
 def drill_total_opex(month_code):
     """Get all indirect expense transactions for a month."""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
+    ie_ph, ie_g = _nature_ph(conn, 'indirect_expense')
+    rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.VOUCHERTYPENAME, a.LEDGERNAME, v.PARTYLEDGERNAME, v.NARRATION,
                ABS(CAST(a.AMOUNT AS REAL)) as amount
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Indirect Expenses' AND SUBSTR(v.DATE,1,6) = ? AND CAST(a.AMOUNT AS REAL) < 0
+        WHERE l.PARENT IN ({ie_ph}) AND SUBSTR(v.DATE,1,6) = ? AND CAST(a.AMOUNT AS REAL) < 0
         ORDER BY a.LEDGERNAME, v.DATE
-    """, (month_code,)).fetchall()
+    """, ie_g + [month_code]).fetchall()
     conn.close()
     df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Type", "Expense Head", "Party", "Narration", "Amount"])
     return df

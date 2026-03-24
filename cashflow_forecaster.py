@@ -134,6 +134,36 @@ def _has_column_cf(conn, table_name, column_name):
         return False
 
 
+def _get_all_groups_under_cf(conn, root_groups):
+    """Recursively get all group names under any of the root groups (inclusive)."""
+    if isinstance(root_groups, str):
+        root_groups = [root_groups]
+    if not _has_table_cf(conn, "mst_group"):
+        return list(root_groups)
+    result = []
+    queue = list(root_groups)
+    while queue:
+        current = queue.pop(0)
+        if current not in result:
+            result.append(current)
+            try:
+                children = conn.execute(
+                    "SELECT NAME FROM mst_group WHERE PARENT = ?", (current,)
+                ).fetchall()
+            except Exception:
+                children = []
+            for (child,) in children:
+                if child and child not in result:
+                    queue.append(child)
+    return result
+
+
+def _group_ph_cf(conn, root_groups):
+    """Return (placeholders_sql, group_list) for IN clauses."""
+    groups = _get_all_groups_under_cf(conn, root_groups)
+    return ",".join(["?"] * len(groups)), groups
+
+
 _EMPTY_RESULT = {"monthly_data": [], "patterns": {}, "current_position": {}}
 
 
@@ -210,104 +240,110 @@ def _analyze_historical_impl(conn, months_back):
     """).fetchall()
     payment_by_month = {r[0]: r[1] for r in payment_rows}
 
-    # ---- Sales receipts (from Sales Accounts ledgers) ----
-    sales_rows = conn.execute("""
+    # ---- Sales receipts (from Sales Accounts ledgers, recursive) ----
+    _s_ph, _s_g = _group_ph_cf(conn, ["Sales Accounts"])
+    sales_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Sales Accounts'
+        WHERE l.PARENT IN ({_s_ph})
         GROUP BY month
-    """).fetchall()
+    """, _s_g).fetchall()
     sales_by_month = {r[0]: r[1] for r in sales_rows}
 
-    # ---- Purchase payments ----
-    purchase_rows = conn.execute("""
+    # ---- Purchase payments (recursive) ----
+    _p_ph, _p_g = _group_ph_cf(conn, ["Purchase Accounts"])
+    purchase_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Purchase Accounts'
+        WHERE l.PARENT IN ({_p_ph})
         GROUP BY month
-    """).fetchall()
+    """, _p_g).fetchall()
     purchase_by_month = {r[0]: r[1] for r in purchase_rows}
 
-    # ---- Salary payments (group may not exist in all companies) ----
+    # ---- Salary payments (group may not exist in all companies, recursive) ----
     salary_by_month = {}
     try:
-        salary_rows = conn.execute("""
+        _sal_ph, _sal_g = _group_ph_cf(conn, ["Salary Expenses"])
+        salary_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Salary Expenses'
+            WHERE l.PARENT IN ({_sal_ph})
             GROUP BY month
-        """).fetchall()
+        """, _sal_g).fetchall()
         salary_by_month = {r[0]: r[1] for r in (salary_rows or [])}
     except Exception:
         pass
 
-    # ---- GST payments (Duties & Taxes ledgers with GST/CGST/SGST/IGST) ----
-    gst_rows = conn.execute("""
+    # ---- GST payments (Duties & Taxes ledgers with GST/CGST/SGST/IGST, recursive) ----
+    _dt_ph, _dt_g = _group_ph_cf(conn, ["Duties & Taxes"])
+    gst_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Duties & Taxes'
+        WHERE l.PARENT IN ({_dt_ph})
           AND (l.NAME LIKE '%GST%' OR l.NAME LIKE '%CGST%'
                OR l.NAME LIKE '%SGST%' OR l.NAME LIKE '%IGST%')
           AND v.VOUCHERTYPENAME = 'Payment'
         GROUP BY month
-    """).fetchall()
+    """, _dt_g).fetchall()
     gst_by_month = {r[0]: r[1] for r in gst_rows}
 
-    # ---- TDS payments ----
-    tds_rows = conn.execute("""
+    # ---- TDS payments (recursive) ----
+    tds_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-        WHERE l.PARENT = 'Duties & Taxes'
+        WHERE l.PARENT IN ({_dt_ph})
           AND l.NAME LIKE '%TDS%'
           AND v.VOUCHERTYPENAME = 'Payment'
         GROUP BY month
-    """).fetchall()
+    """, _dt_g).fetchall()
     tds_by_month = {r[0]: r[1] for r in tds_rows}
 
-    # ---- Rent payments (group may not exist) ----
+    # ---- Rent payments (group may not exist, recursive) ----
     rent_by_month = {}
     try:
-        rent_rows = conn.execute("""
+        _rnt_ph, _rnt_g = _group_ph_cf(conn, ["Rent Expenses"])
+        rent_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT = 'Rent Expenses'
+            WHERE l.PARENT IN ({_rnt_ph})
             GROUP BY month
-        """).fetchall()
+        """, _rnt_g).fetchall()
         rent_by_month = {r[0]: r[1] for r in (rent_rows or [])}
     except Exception:
         pass
 
-    # ---- Loan payments (EMI detection, group may not exist) ----
+    # ---- Loan payments (EMI detection, group may not exist, recursive) ----
     loan_by_month = {}
     try:
-        loan_rows = conn.execute("""
+        _ln_ph, _ln_g = _group_ph_cf(conn, ["Secured Loans", "Unsecured Loans", "Loans (Liability)"])
+        loan_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    SUM(ABS(CAST(a.AMOUNT AS REAL))) as amt
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
-            WHERE l.PARENT IN ('Secured Loans', 'Unsecured Loans', 'Loans (Liability)')
+            WHERE l.PARENT IN ({_ln_ph})
               AND v.VOUCHERTYPENAME = 'Payment'
             GROUP BY month
-        """).fetchall()
+        """, _ln_g).fetchall()
         loan_by_month = {r[0]: r[1] for r in (loan_rows or [])}
     except Exception:
         pass
@@ -382,19 +418,21 @@ def _analyze_historical_impl(conn, months_back):
     total_payables = 0
     if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
         try:
-            debtor_row = conn.execute("""
+            _dr_ph, _dr_g = _group_ph_cf(conn, ["Sundry Debtors"])
+            debtor_row = conn.execute(f"""
                 SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
-                FROM mst_ledger WHERE PARENT = 'Sundry Debtors'
-            """).fetchone()
+                FROM mst_ledger WHERE PARENT IN ({_dr_ph})
+            """, _dr_g).fetchone()
             total_receivables = (debtor_row[0] if debtor_row else 0) or 0
         except Exception:
             pass
 
         try:
-            creditor_row = conn.execute("""
+            _cr_ph, _cr_g = _group_ph_cf(conn, ["Sundry Creditors"])
+            creditor_row = conn.execute(f"""
                 SELECT COALESCE(SUM(ABS(CAST(CLOSINGBALANCE AS REAL))), 0)
-                FROM mst_ledger WHERE PARENT = 'Sundry Creditors'
-            """).fetchone()
+                FROM mst_ledger WHERE PARENT IN ({_cr_ph})
+            """, _cr_g).fetchone()
             total_payables = (creditor_row[0] if creditor_row else 0) or 0
         except Exception:
             pass
@@ -423,21 +461,23 @@ def _analyze_historical_impl(conn, months_back):
     cash_balance = 0
     if _has_table_cf(conn, "mst_ledger") and _has_column_cf(conn, "mst_ledger", "CLOSINGBALANCE"):
         try:
-            bank_rows = conn.execute("""
+            _bk_ph, _bk_g = _group_ph_cf(conn, ["Bank Accounts", "Bank OD A/c"])
+            bank_rows = conn.execute(f"""
                 SELECT NAME, PARENT, CAST(CLOSINGBALANCE AS REAL)
                 FROM mst_ledger
-                WHERE PARENT IN ('Bank Accounts', 'Bank OD A/c')
-            """).fetchall() or []
+                WHERE PARENT IN ({_bk_ph})
+            """, _bk_g).fetchall() or []
             # In Tally, bank debit balance (asset) is negative CLOSINGBALANCE
             bank_balance = sum(abs(r[2]) for r in bank_rows if r[2] and r[2] < 0)
         except Exception:
             pass
 
         try:
-            cash_rows = conn.execute("""
+            _ci_ph, _ci_g = _group_ph_cf(conn, ["Cash-in-Hand"])
+            cash_rows = conn.execute(f"""
                 SELECT CAST(CLOSINGBALANCE AS REAL)
-                FROM mst_ledger WHERE PARENT = 'Cash-in-Hand'
-            """).fetchall() or []
+                FROM mst_ledger WHERE PARENT IN ({_ci_ph})
+            """, _ci_g).fetchall() or []
             # Cash debit balance is negative in Tally
             cash_balance = sum(abs(r[0]) for r in cash_rows if r[0] and r[0] < 0)
             # Also check positive (some Tally versions)
