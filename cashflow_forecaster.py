@@ -164,6 +164,108 @@ def _group_ph_cf(conn, root_groups):
     return ",".join(["?"] * len(groups)), groups
 
 
+def _get_groups_by_nature_cf(conn, nature):
+    """Get all group names by financial nature using Tally's own flags.
+    Falls back to hardcoded root groups if flags are missing.
+    Supports: sales, purchase, income, expense, asset, liability,
+              debtors, creditors, bank, cash, bank_od, loans,
+              duties_taxes, fixed_assets, stock, capital
+    """
+    _FALLBACK = {
+        'sales': ["Sales Accounts"],
+        'purchase': ["Purchase Accounts"],
+        'income': ["Sales Accounts", "Direct Incomes", "Indirect Incomes"],
+        'expense': ["Purchase Accounts", "Direct Expenses", "Indirect Expenses", "Manufacturing Expenses"],
+        'asset': ["Fixed Assets", "Investments", "Current Assets", "Loans & Advances (Asset)",
+                  "Stock-in-Hand", "Sundry Debtors", "Bank Accounts", "Cash-in-Hand",
+                  "Deposits (Assets)", "Bank OD A/c"],
+        'liability': ["Capital Account", "Reserves & Surplus", "Current Liabilities",
+                      "Loans (Liability)", "Secured Loans", "Unsecured Loans",
+                      "Sundry Creditors", "Duties & Taxes", "Provisions"],
+        'debtors': ["Sundry Debtors"],
+        'creditors': ["Sundry Creditors"],
+        'bank': ["Bank Accounts"],
+        'bank_od': ["Bank OD A/c"],
+        'cash': ["Cash-in-Hand"],
+        'loans': ["Secured Loans", "Unsecured Loans", "Loans (Liability)"],
+        'duties_taxes': ["Duties & Taxes"],
+        'fixed_assets': ["Fixed Assets"],
+        'stock': ["Stock-in-Hand"],
+        'capital': ["Capital Account"],
+    }
+    # Check if mst_group has Tally flags
+    has_flags = False
+    if _has_table_cf(conn, "mst_group"):
+        try:
+            cols = {r[1].upper() for r in conn.execute("PRAGMA table_info(mst_group)").fetchall()}
+            has_flags = "ISREVENUE" in cols and "ISDEEMEDPOSITIVE" in cols
+        except Exception:
+            pass
+
+    if not has_flags:
+        roots = _FALLBACK.get(nature, [])
+        return _get_all_groups_under_cf(conn, roots)
+
+    # Flag-based detection
+    _FLAG_QUERIES = {
+        'sales': "ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'",
+        'purchase': "ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes'",
+        'income': "ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No'",
+        'expense': "ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes'",
+        'asset': "ISREVENUE='No' AND ISDEEMEDPOSITIVE='Yes'",
+        'liability': "ISREVENUE='No' AND ISDEEMEDPOSITIVE='No'",
+    }
+    if nature in _FLAG_QUERIES:
+        try:
+            rows = conn.execute(
+                f"SELECT NAME FROM mst_group WHERE {_FLAG_QUERIES[nature]}"
+            ).fetchall()
+            return [r[0] for r in rows] if rows else _get_all_groups_under_cf(conn, _FALLBACK.get(nature, []))
+        except Exception:
+            return _get_all_groups_under_cf(conn, _FALLBACK.get(nature, []))
+
+    # For specific sub-natures, use recursive walk from standard roots
+    roots = _FALLBACK.get(nature, [])
+    return _get_all_groups_under_cf(conn, roots)
+
+
+def _nature_ph_cf(conn, nature):
+    """Return (placeholders_sql, group_list) for a given nature (e.g., 'sales', 'debtors')."""
+    groups = _get_groups_by_nature_cf(conn, nature)
+    if not groups:
+        # Ensure at least one placeholder to avoid SQL syntax error
+        groups = ["__NONEXISTENT_GROUP__"]
+    return ",".join(["?"] * len(groups)), groups
+
+
+def _detect_receipt_payment_types_cf(conn):
+    """Dynamically detect Receipt and Payment voucher types using mst_voucher_type PARENT hierarchy.
+    Returns (receipt_types, payment_types) as lists of voucher type names.
+    """
+    receipt_types = []
+    payment_types = []
+    if _has_table_cf(conn, "mst_voucher_type"):
+        try:
+            rows = conn.execute("SELECT NAME, PARENT FROM mst_voucher_type").fetchall()
+            for name, parent in rows:
+                if not name:
+                    continue
+                upper_parent = (parent or "").upper()
+                upper_name = name.upper()
+                if upper_parent == "RECEIPT" or upper_name == "RECEIPT":
+                    receipt_types.append(name)
+                elif upper_parent == "PAYMENT" or upper_name == "PAYMENT":
+                    payment_types.append(name)
+        except Exception:
+            pass
+    # Fallback
+    if not receipt_types:
+        receipt_types = ["Receipt"]
+    if not payment_types:
+        payment_types = ["Payment"]
+    return receipt_types, payment_types
+
+
 _EMPTY_RESULT = {"monthly_data": [], "patterns": {}, "current_position": {}}
 
 
@@ -218,26 +320,31 @@ def _analyze_historical_impl(conn, months_back):
 
     all_months = _months_between(start_ym, max_ym)
 
+    # ---- Detect receipt/payment voucher types dynamically ----
+    receipt_types, payment_types = _detect_receipt_payment_types_cf(conn)
+
     # ---- Monthly receipts (Receipt vouchers, deemed-positive side) ----
-    receipt_rows = conn.execute("""
+    _rph = ",".join(["?"] * len(receipt_types))
+    receipt_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE v.VOUCHERTYPENAME = 'Receipt' AND a.ISDEEMEDPOSITIVE = 'Yes'
+        WHERE v.VOUCHERTYPENAME IN ({_rph}) AND a.ISDEEMEDPOSITIVE = 'Yes'
         GROUP BY month
-    """).fetchall()
+    """, receipt_types).fetchall()
     receipt_by_month = {r[0]: r[1] for r in receipt_rows}
 
     # ---- Monthly payments (Payment vouchers, deemed-positive side) ----
-    payment_rows = conn.execute("""
+    _pph = ",".join(["?"] * len(payment_types))
+    payment_rows = conn.execute(f"""
         SELECT SUBSTR(v.DATE,1,6) as month,
                ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-        WHERE v.VOUCHERTYPENAME = 'Payment' AND a.ISDEEMEDPOSITIVE = 'Yes'
+        WHERE v.VOUCHERTYPENAME IN ({_pph}) AND a.ISDEEMEDPOSITIVE = 'Yes'
         GROUP BY month
-    """).fetchall()
+    """, payment_types).fetchall()
     payment_by_month = {r[0]: r[1] for r in payment_rows}
 
     # ---- Sales receipts (from Sales Accounts ledgers, recursive) ----
@@ -294,9 +401,9 @@ def _analyze_historical_impl(conn, months_back):
         WHERE l.PARENT IN ({_dt_ph})
           AND (l.NAME LIKE '%GST%' OR l.NAME LIKE '%CGST%'
                OR l.NAME LIKE '%SGST%' OR l.NAME LIKE '%IGST%')
-          AND v.VOUCHERTYPENAME = 'Payment'
+          AND v.VOUCHERTYPENAME IN ({_pph})
         GROUP BY month
-    """, _dt_g).fetchall()
+    """, _dt_g + payment_types).fetchall()
     gst_by_month = {r[0]: r[1] for r in gst_rows}
 
     # ---- TDS payments (recursive) ----
@@ -308,9 +415,9 @@ def _analyze_historical_impl(conn, months_back):
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
         WHERE l.PARENT IN ({_dt_ph})
           AND l.NAME LIKE '%TDS%'
-          AND v.VOUCHERTYPENAME = 'Payment'
+          AND v.VOUCHERTYPENAME IN ({_pph})
         GROUP BY month
-    """, _dt_g).fetchall()
+    """, _dt_g + payment_types).fetchall()
     tds_by_month = {r[0]: r[1] for r in tds_rows}
 
     # ---- Rent payments (group may not exist, recursive) ----
@@ -334,6 +441,8 @@ def _analyze_historical_impl(conn, months_back):
     loan_by_month = {}
     try:
         _ln_ph, _ln_g = _nature_ph_cf(conn, 'loans')
+        # Use dynamically detected payment types instead of hardcoded 'Payment'
+        _pay_ph = ",".join(["?"] * len(payment_types))
         loan_rows = conn.execute(f"""
             SELECT SUBSTR(v.DATE,1,6) as month,
                    ABS(SUM(CAST(a.AMOUNT AS REAL))) as amt
@@ -341,9 +450,9 @@ def _analyze_historical_impl(conn, months_back):
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
             WHERE l.PARENT IN ({_ln_ph})
-              AND v.VOUCHERTYPENAME = 'Payment'
+              AND v.VOUCHERTYPENAME IN ({_pay_ph})
             GROUP BY month
-        """, _ln_g).fetchall()
+        """, _ln_g + payment_types).fetchall()
         loan_by_month = {r[0]: r[1] for r in (loan_rows or [])}
     except Exception:
         pass

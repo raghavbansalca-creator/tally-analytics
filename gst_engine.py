@@ -89,11 +89,35 @@ def _get_company_state(conn=None):
     return result
 
 
+def _get_duty_groups(conn):
+    """Get all groups recursively under 'Duties & Taxes'."""
+    groups = set()
+    try:
+        rows = conn.execute("SELECT NAME, PARENT FROM mst_group").fetchall()
+    except Exception:
+        return groups
+    children_map = {}
+    for name, parent in rows:
+        children_map.setdefault((parent or "").upper(), []).append(name)
+    queue = ["Duties & Taxes"]
+    while queue:
+        current = queue.pop(0)
+        groups.add(current)
+        for child in children_map.get(current.upper(), []):
+            if child not in groups:
+                queue.append(child)
+    return groups
+
+
 def _detect_gst_ledgers(conn):
     """Auto-detect GST ledgers from mst_ledger based on parent group and name patterns.
     Returns dict with keys: output_cgst, output_sgst, output_igst,
                             input_cgst, input_sgst, input_igst,
+                            unified_cgst, unified_sgst, unified_igst,
                             sales, purchases
+    Unified keys hold ledgers that serve as BOTH output and input (e.g., plain "CGST").
+    When unified ledgers exist, they are also added to output_* and input_* lists
+    so downstream code works without modification.
     """
     cache_key = "_gst_ledger_cache"
     # Check if we already cached this
@@ -103,6 +127,7 @@ def _detect_gst_ledgers(conn):
     result = {
         "output_cgst": [], "output_sgst": [], "output_igst": [],
         "input_cgst": [], "input_sgst": [], "input_igst": [],
+        "unified_cgst": [], "unified_sgst": [], "unified_igst": [],
         "sales": [], "purchases": [],
     }
 
@@ -113,16 +138,19 @@ def _detect_gst_ledgers(conn):
     except Exception:
         return result
 
+    # Build set of all groups under Duties & Taxes (recursive)
+    duty_groups = _get_duty_groups(conn)
+
     for name, parent in rows:
         if not name:
             continue
         upper_name = name.upper()
         upper_parent = (parent or "").upper()
 
-        # GST ledgers are typically under "Duties & Taxes" group
-        is_duty = "DUTI" in upper_parent or "TAX" in upper_parent
+        # Check if ledger is under Duties & Taxes hierarchy (recursive)
+        is_duty = (parent or "") in duty_groups
 
-        # Output GST detection
+        # Output GST detection (explicit OUTPUT in name)
         if "OUTPUT" in upper_name or (is_duty and "OUT" in upper_name):
             if "CGST" in upper_name:
                 result["output_cgst"].append(name)
@@ -131,7 +159,7 @@ def _detect_gst_ledgers(conn):
             elif "IGST" in upper_name:
                 result["output_igst"].append(name)
 
-        # Input GST detection
+        # Input GST detection (explicit INPUT in name)
         elif "INPUT" in upper_name or (is_duty and "INP" in upper_name):
             if "CGST" in upper_name:
                 result["input_cgst"].append(name)
@@ -140,9 +168,14 @@ def _detect_gst_ledgers(conn):
             elif "IGST" in upper_name:
                 result["input_igst"].append(name)
 
-        # Standalone IGST (no INPUT/OUTPUT prefix) under Duties & Taxes
-        elif is_duty and upper_name == "IGST":
-            result["input_igst"].append(name)
+        # Plain CGST/SGST/IGST under Duties & Taxes (no OUTPUT/INPUT prefix)
+        # These are unified ledgers — used for both output and input
+        elif is_duty and upper_name in ("CGST",):
+            result["unified_cgst"].append(name)
+        elif is_duty and upper_name in ("SGST", "UTGST"):
+            result["unified_sgst"].append(name)
+        elif is_duty and upper_name in ("IGST",):
+            result["unified_igst"].append(name)
 
         # Sales ledgers — under Sales Accounts or similar
         elif "SALES" in upper_parent or "SALE" in upper_parent:
@@ -156,9 +189,75 @@ def _detect_gst_ledgers(conn):
         elif upper_parent == "DIRECT EXPENSES" and "PURCHASE" in upper_name:
             result["purchases"].append(name)
 
+    # ── Unified ledger fallback ──
+    # If no separate OUTPUT ledgers found but unified ones exist,
+    # add unified ledgers to BOTH output and input lists.
+    # Downstream code uses voucher context to determine direction.
+    if not result["output_cgst"] and result["unified_cgst"]:
+        result["output_cgst"].extend(result["unified_cgst"])
+        result["input_cgst"].extend(result["unified_cgst"])
+    if not result["output_sgst"] and result["unified_sgst"]:
+        result["output_sgst"].extend(result["unified_sgst"])
+        result["input_sgst"].extend(result["unified_sgst"])
+    if not result["output_igst"] and result["unified_igst"]:
+        result["output_igst"].extend(result["unified_igst"])
+        result["input_igst"].extend(result["unified_igst"])
+
     # Cache it
     setattr(_detect_gst_ledgers, cache_key, result)
     return result
+
+
+def _has_unified_gst(gst):
+    """Check if the detected GST ledgers include any unified (combined) ledgers."""
+    return bool(gst.get("unified_cgst") or gst.get("unified_sgst") or gst.get("unified_igst"))
+
+
+def _get_voucher_type_families(conn):
+    """Use mst_voucher_type PARENT hierarchy to classify voucher types.
+    Returns dict with keys: sales, purchase, credit_note, debit_note, receipt, payment
+    Each value is a set of voucher type names belonging to that family.
+    """
+    cache_key = "_vchtype_family_cache"
+    if hasattr(_get_voucher_type_families, cache_key):
+        return getattr(_get_voucher_type_families, cache_key)
+
+    families = {
+        "sales": set(), "purchase": set(), "credit_note": set(),
+        "debit_note": set(), "receipt": set(), "payment": set(),
+    }
+    parent_map = {
+        "SALES": "sales", "PURCHASE": "purchase",
+        "CREDIT NOTE": "credit_note", "DEBIT NOTE": "debit_note",
+        "RECEIPT": "receipt", "PAYMENT": "payment",
+    }
+    try:
+        rows = conn.execute("SELECT NAME, PARENT FROM mst_voucher_type").fetchall()
+        for name, parent in rows:
+            if not name:
+                continue
+            upper_parent = (parent or "").upper()
+            upper_name = name.upper()
+            for key_parent, family_key in parent_map.items():
+                if upper_parent == key_parent or upper_name == key_parent:
+                    families[family_key].add(name)
+    except Exception:
+        families["sales"] = {"Sales"}
+        families["purchase"] = {"Purchase"}
+        families["credit_note"] = {"Credit Note"}
+        families["debit_note"] = {"Debit Note"}
+        families["receipt"] = {"Receipt"}
+        families["payment"] = {"Payment"}
+
+    setattr(_get_voucher_type_families, cache_key, families)
+    return families
+
+
+def _clear_vchtype_cache():
+    """Clear the voucher type family cache."""
+    cache_key = "_vchtype_family_cache"
+    if hasattr(_get_voucher_type_families, cache_key):
+        delattr(_get_voucher_type_families, cache_key)
 
 
 def _clear_gst_cache():
@@ -166,6 +265,7 @@ def _clear_gst_cache():
     cache_key = "_gst_ledger_cache"
     if hasattr(_detect_gst_ledgers, cache_key):
         delattr(_detect_gst_ledgers, cache_key)
+    _clear_vchtype_cache()
 
 
 def _classify_gst_ledger(name, gst_ledgers):
@@ -244,21 +344,41 @@ def get_available_months(conn=None):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_output_gst_voucher_guids(conn, gst, month=None):
-    """Find all voucher GUIDs that contain output GST entries (excluding Credit Note)."""
-    all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
+    """Find all voucher GUIDs that contain output GST entries (excluding Credit Note family).
+    For unified ledgers, restricts to Sales-family voucher types.
+    """
+    all_output = list(set(gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]))
     if not all_output:
         return set()
     placeholders = ",".join(["?"] * len(all_output))
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
+
+    # Use voucher type families to exclude credit notes properly
+    vch_families = _get_voucher_type_families(conn)
+    cn_types = list(vch_families.get("credit_note", set())) or ["Credit Note"]
+    cn_ph = ",".join(["?"] * len(cn_types))
+
+    has_unified = _has_unified_gst(gst)
+    extra_filter = ""
+    extra_params = []
+    if has_unified:
+        # For unified ledgers, restrict to Sales-family voucher types
+        sales_types = list(vch_families.get("sales", set())) or ["Sales"]
+        sales_ph = ",".join(["?"] * len(sales_types))
+        extra_filter = f"AND v.VOUCHERTYPENAME IN ({sales_ph})"
+        extra_params = sales_types
+
     try:
+        params = all_output + extra_params + cn_types
         rows = conn.execute(f"""
             SELECT DISTINCT v.GUID
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             WHERE a.LEDGERNAME IN ({placeholders})
-              AND v.VOUCHERTYPENAME != 'Credit Note'
+              {extra_filter}
+              AND v.VOUCHERTYPENAME NOT IN ({cn_ph})
               {month_filter}
-        """, all_output).fetchall()
+        """, params).fetchall()
         return {r[0] for r in rows}
     except sqlite3.OperationalError:
         return set()
@@ -936,10 +1056,35 @@ def gstr3b_summary(conn, month=None):
     if month:
         # Month-specific: sum from vouchers that contain output/input GST
         month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'"
+        has_unified = _has_unified_gst(gst)
 
-        # Get output GST voucher GUIDs for this month
-        all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
-        all_input = gst["input_cgst"] + gst["input_sgst"] + gst["input_igst"]
+        # Determine voucher type families for unified ledger direction detection
+        vch_families = _get_voucher_type_families(conn) if has_unified else {}
+        sales_types = vch_families.get("sales", set()) if has_unified else set()
+        purchase_types = vch_families.get("purchase", set()) if has_unified else set()
+        cn_types = vch_families.get("credit_note", set()) if has_unified else set()
+        dn_types = vch_families.get("debit_note", set()) if has_unified else set()
+
+        # Build deduplicated GST ledger lists
+        all_gst_ledgers = list(set(
+            gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"] +
+            gst["input_cgst"] + gst["input_sgst"] + gst["input_igst"]
+        ))
+        all_output = list(set(gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]))
+        all_input = list(set(gst["input_cgst"] + gst["input_sgst"] + gst["input_igst"]))
+
+        # Sets for fast lookup
+        unified_cgst_set = set(gst.get("unified_cgst", []))
+        unified_sgst_set = set(gst.get("unified_sgst", []))
+        unified_igst_set = set(gst.get("unified_igst", []))
+        out_cgst_set = set(gst["output_cgst"])
+        out_sgst_set = set(gst["output_sgst"])
+        out_igst_set = set(gst["output_igst"])
+        in_cgst_set = set(gst["input_cgst"])
+        in_sgst_set = set(gst["input_sgst"])
+        in_igst_set = set(gst["input_igst"])
+        sales_set = set(gst["sales"])
+        purchase_set = set(gst["purchases"])
 
         # Output: sum absolute amounts from vouchers containing output GST
         out_taxable = 0.0
@@ -949,12 +1094,27 @@ def gstr3b_summary(conn, month=None):
 
         if all_output:
             ph = ",".join(["?"] * len(all_output))
-            out_guids = conn.execute(f"""
-                SELECT DISTINCT a.VOUCHER_GUID FROM trn_accounting a
-                JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-                WHERE a.LEDGERNAME IN ({ph}) AND CAST(a.AMOUNT AS REAL) > 0
-                  {month_filter}
-            """, all_output).fetchall()
+            if has_unified:
+                # For unified ledgers, use voucher type to identify output
+                out_type_list = list(sales_types)
+                if not out_type_list:
+                    out_type_list = ["Sales"]
+                out_type_ph = ",".join(["?"] * len(out_type_list))
+                out_guids = conn.execute(f"""
+                    SELECT DISTINCT a.VOUCHER_GUID FROM trn_accounting a
+                    JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                    WHERE a.LEDGERNAME IN ({ph})
+                      AND v.VOUCHERTYPENAME IN ({out_type_ph})
+                      AND v.VOUCHERTYPENAME NOT IN (SELECT NAME FROM mst_voucher_type WHERE UPPER(PARENT)='CREDIT NOTE')
+                      {month_filter}
+                """, all_output + out_type_list).fetchall()
+            else:
+                out_guids = conn.execute(f"""
+                    SELECT DISTINCT a.VOUCHER_GUID FROM trn_accounting a
+                    JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                    WHERE a.LEDGERNAME IN ({ph}) AND CAST(a.AMOUNT AS REAL) > 0
+                      {month_filter}
+                """, all_output).fetchall()
             out_guid_set = {r[0] for r in out_guids}
 
             for guid in out_guid_set:
@@ -964,13 +1124,13 @@ def gstr3b_summary(conn, month=None):
                 ).fetchall()
                 for ledger, amt in entries:
                     amt = _safe_float(amt)
-                    if ledger in gst["sales"]:
+                    if ledger in sales_set:
                         out_taxable += abs(amt)
-                    elif ledger in gst["output_cgst"]:
+                    elif ledger in out_cgst_set:
                         out_cgst += abs(amt)
-                    elif ledger in gst["output_sgst"]:
+                    elif ledger in out_sgst_set:
                         out_sgst += abs(amt)
-                    elif ledger in gst["output_igst"]:
+                    elif ledger in out_igst_set:
                         out_igst += abs(amt)
 
         # Credit notes for this month
@@ -980,12 +1140,16 @@ def gstr3b_summary(conn, month=None):
         cn_igst = 0.0
 
         if all_output:
+            ph = ",".join(["?"] * len(all_output))
+            # Use voucher type family for credit notes
+            cn_type_list = list(cn_types) if cn_types else ["Credit Note"]
+            cn_type_ph = ",".join(["?"] * len(cn_type_list))
             cn_guids = conn.execute(f"""
                 SELECT DISTINCT a.VOUCHER_GUID FROM trn_accounting a
                 JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-                WHERE a.LEDGERNAME IN ({ph}) AND v.VOUCHERTYPENAME = 'Credit Note'
+                WHERE a.LEDGERNAME IN ({ph}) AND v.VOUCHERTYPENAME IN ({cn_type_ph})
                   {month_filter}
-            """, all_output).fetchall()
+            """, all_output + cn_type_list).fetchall()
             for (guid,) in cn_guids:
                 entries = conn.execute(
                     "SELECT LEDGERNAME, CAST(AMOUNT AS REAL) FROM trn_accounting WHERE VOUCHER_GUID=?",
@@ -993,13 +1157,13 @@ def gstr3b_summary(conn, month=None):
                 ).fetchall()
                 for ledger, amt in entries:
                     amt = _safe_float(amt)
-                    if ledger in gst["sales"]:
+                    if ledger in sales_set:
                         cn_taxable += abs(amt)
-                    elif ledger in gst["output_cgst"]:
+                    elif ledger in out_cgst_set:
                         cn_cgst += abs(amt)
-                    elif ledger in gst["output_sgst"]:
+                    elif ledger in out_sgst_set:
                         cn_sgst += abs(amt)
-                    elif ledger in gst["output_igst"]:
+                    elif ledger in out_igst_set:
                         cn_igst += abs(amt)
 
         # Input: from purchase vouchers with input GST
@@ -1010,12 +1174,27 @@ def gstr3b_summary(conn, month=None):
 
         if all_input:
             ph_in = ",".join(["?"] * len(all_input))
-            in_guids = conn.execute(f"""
-                SELECT DISTINCT a.VOUCHER_GUID FROM trn_accounting a
-                JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-                WHERE a.LEDGERNAME IN ({ph_in}) AND v.VOUCHERTYPENAME != 'Debit Note'
-                  {month_filter}
-            """, all_input).fetchall()
+            if has_unified:
+                # For unified ledgers, use voucher type to identify input
+                in_type_list = list(purchase_types)
+                if not in_type_list:
+                    in_type_list = ["Purchase"]
+                in_type_ph = ",".join(["?"] * len(in_type_list))
+                in_guids = conn.execute(f"""
+                    SELECT DISTINCT a.VOUCHER_GUID FROM trn_accounting a
+                    JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                    WHERE a.LEDGERNAME IN ({ph_in})
+                      AND v.VOUCHERTYPENAME IN ({in_type_ph})
+                      AND v.VOUCHERTYPENAME NOT IN (SELECT NAME FROM mst_voucher_type WHERE UPPER(PARENT)='DEBIT NOTE')
+                      {month_filter}
+                """, all_input + in_type_list).fetchall()
+            else:
+                in_guids = conn.execute(f"""
+                    SELECT DISTINCT a.VOUCHER_GUID FROM trn_accounting a
+                    JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                    WHERE a.LEDGERNAME IN ({ph_in}) AND v.VOUCHERTYPENAME != 'Debit Note'
+                      {month_filter}
+                """, all_input).fetchall()
             for (guid,) in in_guids:
                 entries = conn.execute(
                     "SELECT LEDGERNAME, CAST(AMOUNT AS REAL) FROM trn_accounting WHERE VOUCHER_GUID=?",
@@ -1023,13 +1202,13 @@ def gstr3b_summary(conn, month=None):
                 ).fetchall()
                 for ledger, amt in entries:
                     amt = _safe_float(amt)
-                    if ledger in gst["purchases"]:
+                    if ledger in purchase_set:
                         in_taxable += abs(amt)
-                    elif ledger in gst["input_cgst"]:
+                    elif ledger in in_cgst_set:
                         in_cgst += abs(amt)
-                    elif ledger in gst["input_sgst"]:
+                    elif ledger in in_sgst_set:
                         in_sgst += abs(amt)
-                    elif ledger in gst["input_igst"]:
+                    elif ledger in in_igst_set:
                         in_igst += abs(amt)
 
     else:
@@ -1047,6 +1226,8 @@ def gstr3b_summary(conn, month=None):
         cn_sgst = 0.0
         cn_igst = 0.0
 
+        has_unified = _has_unified_gst(gst)
+
         try:
             _gst_cols = {r[1] for r in conn.execute("PRAGMA table_info(mst_ledger)").fetchall()}
             _gst_bc = "COMPUTED_CB" if "COMPUTED_CB" in _gst_cols else "CLOSINGBALANCE"
@@ -1057,22 +1238,48 @@ def gstr3b_summary(conn, month=None):
             bal = _safe_float(cb)
             if bal == 0:
                 continue
-            if name in gst["output_cgst"]:
-                out_cgst += bal
-            elif name in gst["output_sgst"]:
-                out_sgst += bal
-            elif name in gst["output_igst"]:
-                out_igst += bal
-            elif name in gst["input_cgst"]:
-                in_cgst += abs(bal)
-            elif name in gst["input_sgst"]:
-                in_sgst += abs(bal)
-            elif name in gst["input_igst"]:
-                in_igst += abs(bal)
-            elif name in gst["sales"]:
-                out_taxable += abs(bal)
-            elif name in gst["purchases"]:
-                in_taxable += abs(bal)
+
+            if has_unified:
+                # Unified ledgers: use sign of closing balance to determine direction.
+                # Negative CB = net output liability (credit balance in Tally)
+                # Positive CB = net input credit (debit balance in Tally)
+                if name in gst.get("unified_cgst", []):
+                    if bal < 0:
+                        out_cgst += abs(bal)
+                    else:
+                        in_cgst += bal
+                elif name in gst.get("unified_sgst", []):
+                    if bal < 0:
+                        out_sgst += abs(bal)
+                    else:
+                        in_sgst += bal
+                elif name in gst.get("unified_igst", []):
+                    if bal < 0:
+                        out_igst += abs(bal)
+                    else:
+                        in_igst += bal
+                elif name in gst["sales"]:
+                    out_taxable += abs(bal)
+                elif name in gst["purchases"]:
+                    in_taxable += abs(bal)
+            else:
+                # Separate OUTPUT/INPUT ledgers: original logic
+                if name in gst["output_cgst"]:
+                    out_cgst += bal
+                elif name in gst["output_sgst"]:
+                    out_sgst += bal
+                elif name in gst["output_igst"]:
+                    out_igst += bal
+                elif name in gst["input_cgst"]:
+                    in_cgst += abs(bal)
+                elif name in gst["input_sgst"]:
+                    in_sgst += abs(bal)
+                elif name in gst["input_igst"]:
+                    in_igst += abs(bal)
+                elif name in gst["sales"]:
+                    out_taxable += abs(bal)
+                elif name in gst["purchases"]:
+                    in_taxable += abs(bal)
 
     section_3_1 = {
         "a_taxable": round(out_taxable, 2),

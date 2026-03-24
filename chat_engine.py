@@ -227,13 +227,9 @@ def _build_data_context(question):
             try:
                 from analytics import monthly_sales
                 data = monthly_sales(conn)
-                labels = {"202504": "Apr'25", "202505": "May'25", "202506": "Jun'25",
-                          "202507": "Jul'25", "202508": "Aug'25", "202509": "Sep'25",
-                          "202510": "Oct'25", "202511": "Nov'25", "202512": "Dec'25",
-                          "202601": "Jan'26"}
                 lines = ["MONTHLY SALES:"]
                 for month, count, amt in data:
-                    lines.append(f"  {labels.get(month, month)}: ₹{amt:,.0f} ({count} invoices)")
+                    lines.append(f"  {_dynamic_month_label(month)}: ₹{amt:,.0f} ({count} invoices)")
                 context_parts.append("\n".join(lines))
             except Exception:
                 pass
@@ -243,13 +239,9 @@ def _build_data_context(question):
             try:
                 from analytics import monthly_purchases
                 data = monthly_purchases(conn)
-                labels = {"202504": "Apr'25", "202505": "May'25", "202506": "Jun'25",
-                          "202507": "Jul'25", "202508": "Aug'25", "202509": "Sep'25",
-                          "202510": "Oct'25", "202511": "Nov'25", "202512": "Dec'25",
-                          "202601": "Jan'26"}
                 lines = ["MONTHLY PURCHASES:"]
                 for month, count, amt in data:
-                    lines.append(f"  {labels.get(month, month)}: ₹{amt:,.0f} ({count} bills)")
+                    lines.append(f"  {_dynamic_month_label(month)}: ₹{amt:,.0f} ({count} bills)")
                 context_parts.append("\n".join(lines))
             except Exception:
                 pass
@@ -717,21 +709,63 @@ def _extract_two_months(q):
     return None, None
 
 
-def _extract_quarter(q):
-    """Extract quarter month codes. Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar."""
+def _extract_quarter(q, conn=None):
+    """Extract quarter month codes dynamically based on the data's financial year.
+    Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar.
+    Determines the FY from data (max date in trn_voucher) rather than hardcoding.
+    """
+    # Determine FY start year from data
+    fy_start_year = 2025  # fallback
+    if conn:
+        try:
+            row = conn.execute("SELECT MAX(DATE) FROM trn_voucher WHERE DATE IS NOT NULL AND DATE != ''").fetchone()
+            if row and row[0]:
+                max_date = str(row[0])
+                y, m = int(max_date[:4]), int(max_date[4:6])
+                # FY starts in April: if month >= 4, FY start = current year, else FY start = previous year
+                fy_start_year = y if m >= 4 else y - 1
+        except Exception:
+            pass
+
+    fy_end_year = fy_start_year + 1
+    sy = str(fy_start_year)
+    ey = str(fy_end_year)
+
+    def _q_months(start_month, start_year):
+        """Generate 3 consecutive month codes starting from start_month of start_year."""
+        codes = []
+        y, m = start_year, start_month
+        for _ in range(3):
+            codes.append(f"{y}{m:02d}")
+            m += 1
+            if m > 12:
+                m = 1
+                y += 1
+        return codes
+
+    q1_months = _q_months(4, fy_start_year)
+    q2_months = _q_months(7, fy_start_year)
+    q3_months = _q_months(10, fy_start_year)
+    q4_months = _q_months(1, fy_end_year)
+
+    q1_label = f"Q1 (Apr-Jun {sy})"
+    q2_label = f"Q2 (Jul-Sep {sy})"
+    q3_label = f"Q3 (Oct-Dec {sy})"
+    q4_label = f"Q4 (Jan-Mar {ey})"
+
     q_map = {
-        "q1": (["202504", "202505", "202506"], "Q1 (Apr-Jun 2025)"),
-        "q2": (["202507", "202508", "202509"], "Q2 (Jul-Sep 2025)"),
-        "q3": (["202510", "202511", "202512"], "Q3 (Oct-Dec 2025)"),
-        "q4": (["202601", "202602", "202603"], "Q4 (Jan-Mar 2026)"),
-        "quarter 1": (["202504", "202505", "202506"], "Q1 (Apr-Jun 2025)"),
-        "quarter 2": (["202507", "202508", "202509"], "Q2 (Jul-Sep 2025)"),
-        "quarter 3": (["202510", "202511", "202512"], "Q3 (Oct-Dec 2025)"),
-        "quarter 4": (["202601", "202602", "202603"], "Q4 (Jan-Mar 2026)"),
-        "first quarter": (["202504", "202505", "202506"], "Q1 (Apr-Jun 2025)"),
-        "second quarter": (["202507", "202508", "202509"], "Q2 (Jul-Sep 2025)"),
-        "third quarter": (["202510", "202511", "202512"], "Q3 (Oct-Dec 2025)"),
-        "fourth quarter": (["202601", "202602", "202603"], "Q4 (Jan-Mar 2026)"),
+        "q1": (q1_months, q1_label),
+        "q2": (q2_months, q2_label),
+        "q3": (q3_months, q3_label),
+        "q4": (q4_months, q4_label),
+        "quarter 1": (q1_months, q1_label),
+        "quarter 2": (q2_months, q2_label),
+        "quarter 3": (q3_months, q3_label),
+        "quarter 4": (q4_months, q4_label),
+        "first quarter": (q1_months, q1_label),
+        "second quarter": (q2_months, q2_label),
+        "third quarter": (q3_months, q3_label),
+        "fourth quarter": (q4_months, q4_label),
     }
     for key, val in q_map.items():
         if key in q:
@@ -1546,7 +1580,7 @@ def smart_answer(question):
 
         # Quarter questions
         if any(kw in q for kw in ["quarter", " q1", " q2", " q3", " q4"]):
-            q_months, q_label = _extract_quarter(q)
+            q_months, q_label = _extract_quarter(q, conn=conn)
             if q_months:
                 from analytics import monthly_sales, monthly_purchases
                 sales_data = {r[0]: (r[1], r[2]) for r in monthly_sales(conn)}

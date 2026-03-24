@@ -13,6 +13,9 @@ from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_data.db")
 
+# Import shared GST ledger detection from gst_engine (single source of truth)
+from gst_engine import _detect_gst_ledgers as _detect_gst_ledgers_shared
+
 # Optional imports — degrade gracefully
 try:
     import pdfplumber
@@ -118,54 +121,14 @@ def _period_label(from_date, to_date):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  GST LEDGER DETECTION (mirrors gst_engine.py pattern)
+#  GST LEDGER DETECTION — uses shared implementation from gst_engine.py
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _detect_gst_ledgers(conn):
-    """Auto-detect GST ledgers from mst_ledger."""
-    result = {
-        "output_cgst": [], "output_sgst": [], "output_igst": [],
-        "input_cgst": [], "input_sgst": [], "input_igst": [],
-        "sales": [], "purchases": [],
-    }
-    try:
-        rows = conn.execute("SELECT name, parent FROM mst_ledger ORDER BY name").fetchall()
-    except Exception:
-        return result
-
-    for name, parent in rows:
-        if not name:
-            continue
-        upper_name = name.upper()
-        upper_parent = (parent or "").upper()
-        is_duty = "DUTI" in upper_parent or "TAX" in upper_parent
-
-        if "OUTPUT" in upper_name or (is_duty and "OUT" in upper_name):
-            if "CGST" in upper_name:
-                result["output_cgst"].append(name)
-            elif "SGST" in upper_name or "UTGST" in upper_name:
-                result["output_sgst"].append(name)
-            elif "IGST" in upper_name:
-                result["output_igst"].append(name)
-        elif "INPUT" in upper_name or (is_duty and "INP" in upper_name):
-            if "CGST" in upper_name:
-                result["input_cgst"].append(name)
-            elif "SGST" in upper_name or "UTGST" in upper_name:
-                result["input_sgst"].append(name)
-            elif "IGST" in upper_name:
-                result["input_igst"].append(name)
-        elif is_duty and upper_name == "IGST":
-            result["input_igst"].append(name)
-        elif "SALES" in upper_parent or "SALE" in upper_parent:
-            result["sales"].append(name)
-        elif upper_parent == "DIRECT INCOMES" and "SALE" in upper_name:
-            result["sales"].append(name)
-        elif "PURCHASE" in upper_parent:
-            result["purchases"].append(name)
-        elif upper_parent == "DIRECT EXPENSES" and "PURCHASE" in upper_name:
-            result["purchases"].append(name)
-
-    return result
+    """Delegate to gst_engine._detect_gst_ledgers (single source of truth).
+    Handles unified CGST/SGST/IGST ledgers and voucher-context-based detection.
+    """
+    return _detect_gst_ledgers_shared(conn)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
