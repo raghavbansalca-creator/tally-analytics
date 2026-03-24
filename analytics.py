@@ -885,7 +885,7 @@ def key_ratios(conn, date_from=None, date_to=None):
 
     wc = working_capital_analysis(conn, date_from=date_from, date_to=date_to)
 
-    total_sales = pl.get("total_income", 0) or 0
+    total_sales = pl.get("revenue", pl.get("total_income", 0)) or 0
     total_expenses = pl.get("total_expense", 0) or 0
     net_profit = pl.get("net_profit", 0) or 0
     gross_profit = pl.get("gross_profit", 0) or 0

@@ -433,12 +433,15 @@ def month_label(m):
 # ── DRILL-DOWN DATA QUERIES ─────────────────────────────────────────────────
 
 def drill_revenue(month_code):
-    """Get all sales invoices for a specific month."""
+    """Get all sales invoices for a specific month.
+    Uses signed amounts so credit notes appear as negative (returns),
+    ensuring the drill-down total matches the monthly aggregate (ABS of net).
+    """
     conn = sqlite3.connect(DB_PATH)
     s_ph, s_g = _nature_ph(conn, 'sales')
     rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
-               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
+               SUM(CAST(a.AMOUNT AS REAL)) as amount, v.VOUCHERTYPENAME
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -446,17 +449,21 @@ def drill_revenue(month_code):
         GROUP BY v.GUID ORDER BY v.DATE
     """, s_g + [month_code]).fetchall()
     conn.close()
-    df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Party", "Narration", "Amount"])
+    # Positive = sales, negative = credit notes/returns
+    df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Party", "Narration", "Amount", "Type"])
     return df
 
 
 def drill_purchases(month_code):
-    """Get all purchase bills for a specific month."""
+    """Get all purchase bills for a specific month.
+    Uses signed amounts so debit notes appear as negative (returns),
+    ensuring the drill-down total matches the monthly aggregate.
+    """
     conn = sqlite3.connect(DB_PATH)
     p_ph, p_g = _nature_ph(conn, 'purchase')
     rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, v.NARRATION,
-               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
+               SUM(CAST(a.AMOUNT AS REAL)) as amount, v.VOUCHERTYPENAME
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -464,7 +471,7 @@ def drill_purchases(month_code):
         GROUP BY v.GUID ORDER BY v.DATE
     """, p_g + [month_code]).fetchall()
     conn.close()
-    df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Party", "Narration", "Amount"])
+    df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Party", "Narration", "Amount", "Type"])
     return df
 
 
@@ -525,13 +532,15 @@ def drill_gross_profit(month_code, data):
 
 
 def drill_customer_invoices(party_name):
-    """Get all invoices for a specific customer."""
+    """Get all invoices for a specific customer.
+    Uses signed amounts so credit notes appear as negative (returns).
+    """
     conn = sqlite3.connect(DB_PATH)
     s_ph, s_g = _nature_ph(conn, 'sales')
     rows = conn.execute(f"""
         SELECT v.DATE, v.VOUCHERNUMBER, SUBSTR(v.DATE,1,6) as month,
                v.NARRATION,
-               ABS(SUM(CAST(a.AMOUNT AS REAL))) as amount
+               SUM(CAST(a.AMOUNT AS REAL)) as amount, v.VOUCHERTYPENAME
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         JOIN mst_ledger l ON l.NAME = a.LEDGERNAME
@@ -540,7 +549,7 @@ def drill_customer_invoices(party_name):
         GROUP BY v.GUID ORDER BY v.DATE
     """, s_g + [party_name]).fetchall()
     conn.close()
-    df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Month", "Narration", "Amount"])
+    df = pd.DataFrame(rows, columns=["Date", "Voucher No", "Month", "Narration", "Amount", "Type"])
     return df
 
 
@@ -657,32 +666,40 @@ def render_drill_view(data, months, pnl, sorted_ledgers):
     # --- Revenue drill ---
     if line == "revenue":
         st.subheader(f"Revenue Drill-Down — {month_lbl}")
-        st.caption("All sales invoices for this month")
+        st.caption("All sales invoices and credit notes for this month")
         df = drill_revenue(month_code)
         if df.empty:
             st.info("No sales transactions found for this month.")
         else:
-            total = df["Amount"].sum()
-            st.markdown(f"**Total: {fmt_indian(total, prefix='₹')}** ({fmt_lakhs(total)}) — {len(df)} invoices")
+            net_total = abs(df["Amount"].sum())
+            n_returns = (df["Amount"] < 0).sum()
+            label_parts = [f"{len(df)} vouchers"]
+            if n_returns > 0:
+                label_parts.append(f"{n_returns} credit notes")
+            st.markdown(f"**Net Revenue: {fmt_indian(net_total, prefix='₹')}** ({fmt_lakhs(net_total)}) — {', '.join(label_parts)}")
             df["Amount (₹)"] = df["Amount"].apply(lambda x: fmt_indian(x, prefix="₹"))
             st.dataframe(
-                df[["Date", "Voucher No", "Party", "Narration", "Amount (₹)"]],
+                df[["Date", "Voucher No", "Type", "Party", "Narration", "Amount (₹)"]],
                 hide_index=True, use_container_width=True, height=min(len(df) * 38 + 40, 600)
             )
 
     # --- Purchases drill ---
     elif line == "purchases":
         st.subheader(f"Purchases Drill-Down — {month_lbl}")
-        st.caption("All purchase bills for this month")
+        st.caption("All purchase bills and debit notes for this month")
         df = drill_purchases(month_code)
         if df.empty:
             st.info("No purchase transactions found for this month.")
         else:
-            total = df["Amount"].sum()
-            st.markdown(f"**Total: {fmt_indian(total, prefix='₹')}** ({fmt_lakhs(total)}) — {len(df)} bills")
+            net_total = abs(df["Amount"].sum())
+            n_returns = (df["Amount"] < 0).sum()
+            label_parts = [f"{len(df)} vouchers"]
+            if n_returns > 0:
+                label_parts.append(f"{n_returns} debit notes")
+            st.markdown(f"**Net Purchases: {fmt_indian(net_total, prefix='₹')}** ({fmt_lakhs(net_total)}) — {', '.join(label_parts)}")
             df["Amount (₹)"] = df["Amount"].apply(lambda x: fmt_indian(x, prefix="₹"))
             st.dataframe(
-                df[["Date", "Voucher No", "Party", "Narration", "Amount (₹)"]],
+                df[["Date", "Voucher No", "Type", "Party", "Narration", "Amount (₹)"]],
                 hide_index=True, use_container_width=True, height=min(len(df) * 38 + 40, 600)
             )
 

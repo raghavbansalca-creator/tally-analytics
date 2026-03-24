@@ -544,15 +544,101 @@ def profit_and_loss(conn, from_date=None, to_date=None,
     income = get_pl_amounts(income_groups)
     expense = get_pl_amounts(expense_groups)
 
-    # Calculate totals
-    total_income = sum(abs(amt) for entries in income.values() for _, amt in entries)
-    total_expense = sum(abs(amt) for entries in expense.values() for _, amt in entries)
+    # ── Stock-in-Hand adjustment (Opening Stock / Closing Stock) ──────────
+    # Tally's P&L includes inventory valuation changes via the Trading Account:
+    #   Opening Stock = expense (goods from last year consumed)
+    #   Closing Stock = income (goods still unsold, reduce cost)
+    # Stock-in-Hand ledgers are ASSET (ISREVENUE=No), so they're not in
+    # income/expense groups. We must add them explicitly.
+    # In the DB, stock values are negative (debit balance = asset).
+    opening_stock = 0.0
+    closing_stock = 0.0
+    stock_groups = get_groups_by_nature(conn, 'stock')
+    if stock_groups and not (from_date or to_date or voucher_types or ledger_groups):
+        # Full-year P&L: use stored OB/CB from mst_ledger
+        placeholders = ",".join(["?"] * len(stock_groups))
+        try:
+            rows = conn.execute(f"""
+                SELECT NAME, OPENINGBALANCE, {_bal_col(conn)}
+                FROM mst_ledger
+                WHERE PARENT IN ({placeholders})
+            """, list(stock_groups)).fetchall()
+            for name, ob, cb in rows:
+                ob_val = abs(float(ob)) if ob else 0.0
+                cb_val = abs(float(cb)) if cb else 0.0
+                opening_stock += ob_val
+                closing_stock += cb_val
+        except (sqlite3.OperationalError, ValueError, TypeError):
+            pass
+    elif stock_groups and from_date and to_date:
+        # Date-filtered P&L: opening stock = balance at start, closing stock = balance at end
+        placeholders = ",".join(["?"] * len(stock_groups))
+        lcols = _get_cols(conn, "mst_ledger")
+        has_ob = "OPENINGBALANCE" in lcols
+        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
+        try:
+            # Opening stock = OB + transactions before from_date
+            rows = conn.execute(f"""
+                SELECT l.NAME,
+                       COALESCE({ob_expr}, 0) +
+                       COALESCE((
+                           SELECT SUM(CAST(a.AMOUNT AS REAL))
+                           FROM trn_accounting a
+                           JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                           WHERE a.LEDGERNAME = l.NAME AND v.DATE < ?
+                       ), 0) as balance
+                FROM mst_ledger l
+                WHERE l.PARENT IN ({placeholders})
+            """, [from_date] + list(stock_groups)).fetchall()
+            for name, bal in rows:
+                opening_stock += abs(float(bal)) if bal else 0.0
 
-    # Gross profit: Direct Income - Direct Expense (groups that affect gross profit)
+            # Closing stock = OB + transactions up to to_date
+            rows = conn.execute(f"""
+                SELECT l.NAME,
+                       COALESCE({ob_expr}, 0) +
+                       COALESCE((
+                           SELECT SUM(CAST(a.AMOUNT AS REAL))
+                           FROM trn_accounting a
+                           JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                           WHERE a.LEDGERNAME = l.NAME AND v.DATE <= ?
+                       ), 0) as balance
+                FROM mst_ledger l
+                WHERE l.PARENT IN ({placeholders})
+            """, [to_date] + list(stock_groups)).fetchall()
+            for name, bal in rows:
+                closing_stock += abs(float(bal)) if bal else 0.0
+        except (sqlite3.OperationalError, ValueError, TypeError):
+            pass
+
+    # Add stock adjustments to income/expense dicts for display
+    if closing_stock > 0:
+        income["Stock-in-Hand"] = [("Closing Stock", closing_stock)]
+    if opening_stock > 0:
+        expense["Stock-in-Hand"] = [("Opening Stock", -opening_stock)]
+
+    # ── Calculate totals using signed sums (not abs) ──────────────────────
+    # Tally sign convention in trn_accounting:
+    #   Income entries: positive amount = income earned
+    #   Expense entries: negative amount = expense incurred
+    #   Contra entries (e.g. forex gain under expenses): opposite sign
+    # Using abs() per entry would mishandle contra entries.
+    # Correct: sum raw amounts, then take abs for display.
+    total_income = sum(amt for entries in income.values() for _, amt in entries)
+    total_expense = -sum(amt for entries in expense.values() for _, amt in entries)
+
+    # Revenue = total income excluding stock adjustments (for ratio calculations)
+    revenue = sum(amt for g, entries in income.items()
+                  if g != "Stock-in-Hand" for _, amt in entries)
+
+    # Gross profit: Direct Income + Closing Stock - Direct Expense - Opening Stock
     direct_income_groups = set(get_groups_by_nature(conn, 'direct_income'))
     direct_expense_groups = set(get_groups_by_nature(conn, 'direct_expense'))
-    gross_income = sum(abs(amt) for g, entries in income.items() if g in direct_income_groups for _, amt in entries)
-    gross_expense = sum(abs(amt) for g, entries in expense.items() if g in direct_expense_groups for _, amt in entries)
+    # Include Stock-in-Hand as direct (affects gross profit / Trading A/c)
+    gross_income_groups = direct_income_groups | {"Stock-in-Hand"}
+    gross_expense_groups = direct_expense_groups | {"Stock-in-Hand"}
+    gross_income = sum(amt for g, entries in income.items() if g in gross_income_groups for _, amt in entries)
+    gross_expense = -sum(amt for g, entries in expense.items() if g in gross_expense_groups for _, amt in entries)
 
     return {
         "income": income,
@@ -561,6 +647,9 @@ def profit_and_loss(conn, from_date=None, to_date=None,
         "net_profit": total_income - total_expense,
         "total_income": total_income,
         "total_expense": total_expense,
+        "revenue": revenue,
+        "opening_stock": opening_stock,
+        "closing_stock": closing_stock,
     }
 
 
@@ -582,6 +671,25 @@ def balance_sheet(conn, as_of_date=None, date_from=None, date_to=None):
 
     assets = get_ledger_totals_by_group(conn, asset_groups, as_of_date, date_from=date_from, date_to=date_to)
     liabilities = get_ledger_totals_by_group(conn, liability_groups, as_of_date, date_from=date_from, date_to=date_to)
+
+    # ── Include Profit & Loss A/c in Liabilities (Capital & Reserves) ─────
+    # P&L A/c sits under "Primary" which is not in mst_group, so it's missed
+    # by get_groups_by_nature(). In Tally, P&L A/c is always shown on the
+    # Liabilities side under Capital Account / Reserves & Surplus.
+    bc = _bal_col(conn)
+    try:
+        pl_row = conn.execute(
+            f"SELECT CAST({bc} AS REAL) FROM mst_ledger WHERE NAME = 'Profit & Loss A/c'"
+        ).fetchone()
+        if pl_row and pl_row[0] and pl_row[0] != 0:
+            pl_balance = pl_row[0]
+            # Add to Capital Account group (or create it if missing)
+            if "Capital Account" in liabilities:
+                liabilities["Capital Account"].append(("Profit & Loss A/c", pl_balance))
+            else:
+                liabilities["Capital Account"] = [("Profit & Loss A/c", pl_balance)]
+    except Exception:
+        pass
 
     # Filter zero balances
     assets = {g: [(n, b) for n, b in entries if b != 0] for g, entries in assets.items()}
