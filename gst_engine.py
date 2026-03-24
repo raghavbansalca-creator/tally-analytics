@@ -504,8 +504,10 @@ def gstr1_b2b_invoices(conn, month=None):
 def gstr1_b2c_invoices(conn, month=None):
     """B2C Sales: Where party has no GSTIN.
     Detects sales by presence of output GST entries.
+    For unified GST ledgers, filters by sales voucher types.
     """
     gst = _detect_gst_ledgers(conn)
+    has_unified = _has_unified_gst(gst)
     company_state = _get_company_state(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
@@ -519,17 +521,44 @@ def gstr1_b2c_invoices(conn, month=None):
     placeholders = ",".join(["?"] * len(all_output))
     pos_col = "v.PLACEOFSUPPLY" if has_pos else "'' AS PLACEOFSUPPLY"
     gstin_filter = "AND (v.PARTYGSTIN IS NULL OR v.PARTYGSTIN = '')" if has_partygstin else ""
+
+    # For unified GST ledgers, restrict to sales voucher types
+    vchtype_filter = ""
+    vchtype_params = []
+    if has_unified:
+        vch_families = _get_voucher_type_families(conn)
+        sales_types = list(vch_families.get("sales", set()))
+        if not sales_types:
+            sales_types = ["Sales"]
+        vchtype_ph = ",".join(["?"] * len(sales_types))
+        vchtype_filter = f"AND v.VOUCHERTYPENAME IN ({vchtype_ph})"
+        vchtype_params = sales_types
+
+    # Build CN exclusion list
+    cn_exclude = ""
+    cn_params = []
+    if has_unified:
+        cn_types = list(vch_families.get("credit_note", set()))
+    else:
+        cn_types = ["Credit Note"]
+    if cn_types:
+        cn_ph = ",".join(["?"] * len(cn_types))
+        cn_exclude = f"AND v.VOUCHERTYPENAME NOT IN ({cn_ph})"
+        cn_params = cn_types
+
     try:
+        params = all_output + vchtype_params + cn_params
         vouchers = conn.execute(f"""
             SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {pos_col}
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             WHERE a.LEDGERNAME IN ({placeholders})
-              AND v.VOUCHERTYPENAME != 'Credit Note'
+              {vchtype_filter}
+              {cn_exclude}
               {gstin_filter}
               {month_filter}
             ORDER BY v.DATE, v.VOUCHERNUMBER
-        """, all_output).fetchall()
+        """, params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -585,7 +614,8 @@ def gstr1_b2c_invoices(conn, month=None):
 
 def gstr1_credit_notes(conn, month=None):
     """Credit Notes (Sales Returns).
-    Detects by Credit Note voucher type with output GST entries.
+    Detects by Credit Note voucher type family with output GST entries.
+    Uses voucher type families to capture all CN sub-types (e.g., CREDIT NOTE ONLINE).
     """
     gst = _detect_gst_ledgers(conn)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
@@ -594,6 +624,13 @@ def gstr1_credit_notes(conn, month=None):
     gstin_col = "v.PARTYGSTIN" if "PARTYGSTIN" in vcols else "'' AS PARTYGSTIN"
     pos_col = "v.PLACEOFSUPPLY" if "PLACEOFSUPPLY" in vcols else "'' AS PLACEOFSUPPLY"
 
+    # Use voucher type family for credit note detection
+    vch_families = _get_voucher_type_families(conn)
+    cn_types = list(vch_families.get("credit_note", set()))
+    if not cn_types:
+        cn_types = ["Credit Note"]
+    cn_ph = ",".join(["?"] * len(cn_types))
+
     all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
     if not all_output:
         # Fallback: just get Credit Note vouchers
@@ -601,10 +638,10 @@ def gstr1_credit_notes(conn, month=None):
             vouchers = conn.execute(f"""
                 SELECT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
                 FROM trn_voucher v
-                WHERE v.VOUCHERTYPENAME = 'Credit Note'
+                WHERE v.VOUCHERTYPENAME IN ({cn_ph})
                   {month_filter}
                 ORDER BY v.DATE, v.VOUCHERNUMBER
-            """).fetchall()
+            """, cn_types).fetchall()
         except sqlite3.OperationalError:
             return []
     else:
@@ -614,11 +651,11 @@ def gstr1_credit_notes(conn, month=None):
                 SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
                 FROM trn_voucher v
                 JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
-                WHERE v.VOUCHERTYPENAME = 'Credit Note'
+                WHERE v.VOUCHERTYPENAME IN ({cn_ph})
                   AND a.LEDGERNAME IN ({placeholders})
                   {month_filter}
                 ORDER BY v.DATE, v.VOUCHERNUMBER
-            """, all_output).fetchall()
+            """, cn_types + all_output).fetchall()
         except sqlite3.OperationalError:
             return []
 
