@@ -58,9 +58,15 @@ def parse_vouchers(xml_str):
     trn_inventory = []
     trn_batch = []
 
+    # CRITICAL: Use ONLY ALLLEDGERENTRIES, NEVER LEDGERENTRIES (causes duplicates)
+    # Tally XML contains BOTH tags with same data — ALL version has full fields,
+    # non-ALL version has slim fields (6 keys). Processing both = 2x entries.
     LEDGER_TAGS = {"ALLLEDGERENTRIES.LIST"}
     INVENTORY_TAGS = {"ALLINVENTORYENTRIES.LIST"}
+    # Explicitly skip ALL duplicate/nested tags including non-ALL versions
     SKIP_TAGS = LEDGER_TAGS | INVENTORY_TAGS | {
+        "LEDGERENTRIES.LIST",           # DUPLICATE of ALLLEDGERENTRIES — NEVER process
+        "INVENTORYENTRIES.LIST",        # DUPLICATE of ALLINVENTORYENTRIES — NEVER process
         "BILLALLOCATIONS.LIST", "BANKALLOCATIONS.LIST",
         "BATCHALLOCATIONS.LIST", "CATEGORYALLOCATIONS.LIST",
         "COSTCENTREALLOCATIONS.LIST", "COSTTRACKALLOCATIONS.LIST",
@@ -157,6 +163,29 @@ def parse_vouchers(xml_str):
                             if val:
                                 batch_data[child.tag] = val
                     trn_batch.append(batch_data)
+
+    # Deduplicate accounting entries as safety net
+    # Tally XML sometimes contains both ALLLEDGERENTRIES and LEDGERENTRIES
+    # with same VOUCHER_GUID + LEDGERNAME + AMOUNT but different field counts
+    before_dedup = len(trn_accounting)
+    if trn_accounting:
+        seen = set()
+        deduped = []
+        for entry in trn_accounting:
+            key = (entry.get("VOUCHER_GUID", ""), entry.get("LEDGERNAME", ""), entry.get("AMOUNT", ""))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(entry)
+            else:
+                # Keep the entry with MORE fields (the ALLLEDGERENTRIES version)
+                for i, existing in enumerate(deduped):
+                    ekey = (existing.get("VOUCHER_GUID", ""), existing.get("LEDGERNAME", ""), existing.get("AMOUNT", ""))
+                    if ekey == key and len(entry) > len(existing):
+                        deduped[i] = entry
+                        break
+        trn_accounting = deduped
+        if before_dedup != len(trn_accounting):
+            print(f"  Deduped trn_accounting: {before_dedup} -> {len(trn_accounting)} ({before_dedup - len(trn_accounting)} duplicates removed)")
 
     return {
         "trn_voucher": trn_voucher,
