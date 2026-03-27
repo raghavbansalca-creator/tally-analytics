@@ -674,8 +674,10 @@ def profit_and_loss(conn, from_date=None, to_date=None,
     opening_stock = 0.0
     closing_stock = 0.0
     stock_groups = get_groups_by_nature(conn, 'stock')
-    if stock_groups and not (from_date or to_date or voucher_types or ledger_groups):
-        # Full-year P&L: use stored OB/CB from mst_ledger
+    # Always use stored OB/CB for stock — stock valuation is Tally-computed
+    # (inventory entries don't go through trn_accounting, so transaction-based
+    # computation gives wrong results for stock)
+    if stock_groups and not (voucher_types or ledger_groups):
         placeholders = ",".join(["?"] * len(stock_groups))
         try:
             rows = conn.execute(f"""
@@ -690,46 +692,9 @@ def profit_and_loss(conn, from_date=None, to_date=None,
                 closing_stock += cb_val
         except (sqlite3.OperationalError, ValueError, TypeError):
             pass
-    elif stock_groups and from_date and to_date:
-        # Date-filtered P&L: opening stock = balance at start, closing stock = balance at end
-        placeholders = ",".join(["?"] * len(stock_groups))
-        lcols = _get_cols(conn, "mst_ledger")
-        has_ob = "OPENINGBALANCE" in lcols
-        ob_expr = "CAST(l.OPENINGBALANCE AS REAL)" if has_ob else "0"
-        try:
-            # Opening stock = OB + transactions before from_date
-            rows = conn.execute(f"""
-                SELECT l.NAME,
-                       COALESCE({ob_expr}, 0) +
-                       COALESCE((
-                           SELECT SUM(CAST(a.AMOUNT AS REAL))
-                           FROM trn_accounting a
-                           JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-                           WHERE a.LEDGERNAME = l.NAME AND v.DATE < ?
-                       ), 0) as balance
-                FROM mst_ledger l
-                WHERE l.PARENT IN ({placeholders})
-            """, [from_date] + list(stock_groups)).fetchall()
-            for name, bal in rows:
-                opening_stock += abs(float(bal)) if bal else 0.0
-
-            # Closing stock = OB + transactions up to to_date
-            rows = conn.execute(f"""
-                SELECT l.NAME,
-                       COALESCE({ob_expr}, 0) +
-                       COALESCE((
-                           SELECT SUM(CAST(a.AMOUNT AS REAL))
-                           FROM trn_accounting a
-                           JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
-                           WHERE a.LEDGERNAME = l.NAME AND v.DATE <= ?
-                       ), 0) as balance
-                FROM mst_ledger l
-                WHERE l.PARENT IN ({placeholders})
-            """, [to_date] + list(stock_groups)).fetchall()
-            for name, bal in rows:
-                closing_stock += abs(float(bal)) if bal else 0.0
-        except (sqlite3.OperationalError, ValueError, TypeError):
-            pass
+    # Note: date-filtered stock was removed because stock valuation is
+    # Tally-computed (via inventory, not trn_accounting). Transaction-based
+    # stock computation gives wrong results. Always use stored OB/CB.
 
     # Add stock adjustments to income/expense dicts for display
     if closing_stock > 0:
