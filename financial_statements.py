@@ -32,7 +32,7 @@ SCHEDULE_III_LIABILITIES = OrderedDict([
         ("share_capital", {
             "label": "Share Capital",
             "note": "2",
-            "groups": ["Share Capital Account"],
+            "groups": ["Share Capital Account", "Capital Account"],
             "exclude_groups": ["Reserves & Surplus"],
         }),
         ("reserves_surplus", {
@@ -204,6 +204,9 @@ SCHEDULE_III_EXPENSES = OrderedDict([
         "label": "Employee benefit expense",
         "note": "21",
         "groups": ["Salary Expenses"],
+        "match_names": ["salary", "wages", "staff welfare", "staff benefit",
+                        "bonus", "gratuity", "leave encashment", "pf contribution",
+                        "esi contribution", "staff insurance"],
     }),
     ("finance_costs", {
         "label": "Finance costs",
@@ -223,7 +226,10 @@ SCHEDULE_III_EXPENSES = OrderedDict([
         "groups": ["Direct Expenses", "Indirect Expenses"],
         "exclude_groups": ["Salary Expenses"],
         "exclude_names": ["interest", "bank charges", "bank od interest",
-                          "depreciation", "amortization", "amortisation"],
+                          "depreciation", "amortization", "amortisation",
+                          "salary", "wages", "staff welfare", "staff benefit",
+                          "bonus", "gratuity", "leave encashment", "pf contribution",
+                          "esi contribution", "staff insurance"],
     }),
 ])
 
@@ -660,9 +666,17 @@ def extract_pl_data(conn):
             opening, closing, _ = _get_stock_ledger_balances(conn)
             amt = opening - closing  # decrease in stock = expense
             expenses[key] = {"label": config["label"], "note": config.get("note", ""), "amount": amt}
-        elif config.get("match_names") and not config.get("groups"):
-            # Finance costs, depreciation: match by name across all expense groups
-            raw = _get_ledger_balances_by_name(conn, config["match_names"])
+        elif config.get("match_names"):
+            # Match by name patterns (optionally restricted to specific parent groups)
+            # Handles: finance_costs, depreciation (no groups), employee_benefit (groups + names)
+            raw_by_name = _get_ledger_balances_by_name(conn, config["match_names"])
+            raw_by_group = 0.0
+            if config.get("groups"):
+                raw_by_group = _get_ledger_balances(
+                    conn, config["groups"],
+                    exclude_names=config.get("match_names"),  # avoid double-counting
+                )
+            raw = raw_by_name + raw_by_group
             expenses[key] = {"label": config["label"], "note": config.get("note", ""), "amount": abs(raw)}
         elif key == "other_expenses":
             raw = _get_ledger_balances(

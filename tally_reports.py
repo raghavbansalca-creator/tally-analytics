@@ -48,6 +48,92 @@ def _bal_col(conn):
     return "COMPUTED_CB" if "COMPUTED_CB" in cols else "CLOSINGBALANCE"
 
 
+# ── GROUP NAME ALIAS RESOLUTION ──────────────────────────────────────────
+# Tally stores canonical names in mst_group.NAME (e.g. "Expenses (Indirect)")
+# but mst_ledger.PARENT uses display names (e.g. "Indirect Expenses").
+# This mapping resolves the mismatch.
+_GROUP_ALIAS_MAP = {
+    # canonical (mst_group.NAME) → display (mst_ledger.PARENT)
+    "Expenses (Indirect)": "Indirect Expenses",
+    "Expenses (Direct)": "Direct Expenses",
+    "Income (Indirect)": "Indirect Incomes",
+    "Income (Direct)": "Direct Incomes",
+    "Deposits (Asset)": "Deposits",
+    "Bank OCC A/c": "Bank OD A/c",
+}
+# Build reverse: display → canonical
+_GROUP_ALIAS_REVERSE = {v: k for k, v in _GROUP_ALIAS_MAP.items()}
+
+
+def resolve_group_aliases(conn):
+    """Build a bidirectional alias map by comparing mst_group.NAME with mst_ledger.PARENT.
+
+    Returns dict mapping every known name (canonical or display) to a set of
+    equivalent names, so lookups work in either direction.
+    """
+    if not _table_exists(conn, "mst_group") or not _table_exists(conn, "mst_ledger"):
+        return _GROUP_ALIAS_MAP.copy()
+
+    group_names = {r[0] for r in conn.execute("SELECT NAME FROM mst_group").fetchall()}
+    ledger_parents = {r[0] for r in conn.execute("SELECT DISTINCT PARENT FROM mst_ledger WHERE PARENT IS NOT NULL").fetchall()}
+
+    # Find ledger parents that aren't in mst_group — these are display aliases
+    orphan_parents = ledger_parents - group_names - {"Primary", "", None}
+    alias_map = _GROUP_ALIAS_MAP.copy()
+
+    # Auto-detect aliases from RESERVEDNAME if available
+    # Query directly (don't use _get_cols cache which may be stale across DBs)
+    try:
+        grp_cols = {r[1] for r in conn.execute("PRAGMA table_info(mst_group)").fetchall()}
+    except sqlite3.OperationalError:
+        grp_cols = set()
+    if "RESERVEDNAME" in grp_cols:
+        for orphan in orphan_parents:
+            # Check if any group has this orphan as its RESERVEDNAME
+            row = conn.execute(
+                "SELECT NAME FROM mst_group WHERE RESERVEDNAME = ?", (orphan,)
+            ).fetchone()
+            if row and row[0] != orphan:
+                alias_map[row[0]] = orphan
+
+    return alias_map
+
+
+def get_group_with_aliases(conn, group_name):
+    """Given a group name, return all equivalent names (canonical + display).
+
+    Use this when querying mst_ledger.PARENT to catch both naming conventions.
+    """
+    aliases = resolve_group_aliases(conn)
+    names = {group_name}
+    # Check forward map
+    if group_name in aliases:
+        names.add(aliases[group_name])
+    # Check reverse map
+    if group_name in _GROUP_ALIAS_REVERSE:
+        names.add(_GROUP_ALIAS_REVERSE[group_name])
+    return list(names)
+
+
+def expand_groups_with_aliases(conn, groups):
+    """Expand a list of group names to include both canonical and display aliases.
+
+    This ensures queries against mst_ledger.PARENT work regardless of whether
+    the database uses canonical names (from mst_group) or display names.
+    """
+    if not groups:
+        return groups
+    alias_map = resolve_group_aliases(conn)
+    reverse_map = {v: k for k, v in alias_map.items()}
+    expanded = set(groups)
+    for g in groups:
+        if g in alias_map:
+            expanded.add(alias_map[g])
+        if g in reverse_map:
+            expanded.add(reverse_map[g])
+    return list(expanded)
+
+
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
@@ -137,6 +223,10 @@ def get_groups_by_nature(conn, nature):
             result.update(get_all_groups_under(conn, [r]))
         return list(result)
 
+    # Check if RESERVEDNAME column exists (not all sync paths export it)
+    _grp_cols = _get_cols(conn, "mst_group")
+    _has_reserved = "RESERVEDNAME" in _grp_cols
+
     try:
         if nature == 'income':
             groups = [r[0] for r in conn.execute(
@@ -156,18 +246,24 @@ def get_groups_by_nature(conn, nature):
             ).fetchall()]
         elif nature == 'sales':
             # Sales Accounts specifically (RESERVEDNAME distinguishes from Direct Incomes)
-            groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND (RESERVEDNAME='Sales Accounts' OR RESERVEDNAME='')"
-            ).fetchall()]
+            if _has_reserved:
+                groups = [r[0] for r in conn.execute(
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND (RESERVEDNAME='Sales Accounts' OR RESERVEDNAME='')"
+                ).fetchall()]
+            else:
+                groups = []
             if not groups:
                 groups = [r[0] for r in conn.execute(
                     "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'"
                 ).fetchall()]
         elif nature == 'purchase':
             # Purchase Accounts specifically (RESERVEDNAME distinguishes from Direct Expenses)
-            groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Purchase Accounts'"
-            ).fetchall()]
+            if _has_reserved:
+                groups = [r[0] for r in conn.execute(
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Purchase Accounts'"
+                ).fetchall()]
+            else:
+                groups = []
             if not groups:
                 # Fallback: all gross-profit expense groups
                 groups = [r[0] for r in conn.execute(
@@ -175,27 +271,48 @@ def get_groups_by_nature(conn, nature):
                 ).fetchall()]
         elif nature == 'direct_income':
             # Direct Incomes specifically (exclude Sales Accounts and its sub-groups)
-            groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Direct Incomes'"
-            ).fetchall()]
-            if not groups:
+            if _has_reserved:
                 groups = [r[0] for r in conn.execute(
-                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME != 'Sales Accounts' AND RESERVEDNAME != ''"
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Direct Incomes'"
                 ).fetchall()]
+            else:
+                groups = []
+            if not groups:
+                if _has_reserved:
+                    groups = [r[0] for r in conn.execute(
+                        "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME != 'Sales Accounts' AND RESERVEDNAME != ''"
+                    ).fetchall()]
+                else:
+                    # Without RESERVEDNAME, exclude known Sales Accounts by name
+                    sales_groups = set(_get_recursive(conn, 'Sales Accounts'))
+                    all_gp_income = [r[0] for r in conn.execute(
+                        "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='Yes'"
+                    ).fetchall()]
+                    groups = [g for g in all_gp_income if g not in sales_groups]
         elif nature == 'indirect_income':
             groups = [r[0] for r in conn.execute(
                 "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='No' AND AFFECTSGROSSPROFIT='No'"
             ).fetchall()]
         elif nature == 'direct_expense':
             # Direct Expenses specifically (RESERVEDNAME distinguishes from Purchase Accounts)
-            groups = [r[0] for r in conn.execute(
-                "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Direct Expenses'"
-            ).fetchall()]
+            if _has_reserved:
+                groups = [r[0] for r in conn.execute(
+                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME='Direct Expenses'"
+                ).fetchall()]
+            else:
+                groups = []
             if not groups:
                 # Fallback: all gross-profit expense groups except Purchase Accounts
-                groups = [r[0] for r in conn.execute(
-                    "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME != 'Purchase Accounts'"
-                ).fetchall()]
+                if _has_reserved:
+                    groups = [r[0] for r in conn.execute(
+                        "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes' AND RESERVEDNAME != 'Purchase Accounts'"
+                    ).fetchall()]
+                else:
+                    purchase_groups = set(_get_recursive(conn, 'Purchase Accounts'))
+                    all_gp_expense = [r[0] for r in conn.execute(
+                        "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='Yes'"
+                    ).fetchall()]
+                    groups = [g for g in all_gp_expense if g not in purchase_groups]
         elif nature == 'indirect_expense':
             groups = [r[0] for r in conn.execute(
                 "SELECT NAME FROM mst_group WHERE ISREVENUE='Yes' AND ISDEEMEDPOSITIVE='Yes' AND AFFECTSGROSSPROFIT='No'"
@@ -225,7 +342,9 @@ def get_groups_by_nature(conn, nature):
             groups = []
     except sqlite3.OperationalError:
         groups = []
-    return groups
+    # Expand with aliases so queries against mst_ledger.PARENT work
+    # regardless of canonical vs display naming
+    return expand_groups_with_aliases(conn, groups)
 
 
 def get_all_groups_under(conn, root_groups):
@@ -248,7 +367,8 @@ def get_all_groups_under(conn, root_groups):
         for (child,) in children:
             if child and child not in all_groups:
                 queue.append(child)
-    return all_groups
+    # Expand with aliases for mst_ledger.PARENT compatibility
+    return set(expand_groups_with_aliases(conn, list(all_groups)))
 
 
 def get_ledger_totals_by_group(conn, group_names, as_of_date=None, date_from=None, date_to=None):
@@ -631,12 +751,16 @@ def profit_and_loss(conn, from_date=None, to_date=None,
     revenue = sum(amt for g, entries in income.items()
                   if g != "Stock-in-Hand" for _, amt in entries)
 
-    # Gross profit: Direct Income + Closing Stock - Direct Expense - Opening Stock
+    # Gross profit: Sales + Direct Income + Closing Stock - Purchases - Direct Expense - Opening Stock
+    # In Tally, Sales Accounts and Purchase Accounts are separate from Direct Incomes/Expenses
+    # but all contribute to the Trading Account (gross profit).
+    sales_groups = set(get_groups_by_nature(conn, 'sales'))
+    purchase_groups = set(get_groups_by_nature(conn, 'purchase'))
     direct_income_groups = set(get_groups_by_nature(conn, 'direct_income'))
     direct_expense_groups = set(get_groups_by_nature(conn, 'direct_expense'))
     # Include Stock-in-Hand as direct (affects gross profit / Trading A/c)
-    gross_income_groups = direct_income_groups | {"Stock-in-Hand"}
-    gross_expense_groups = direct_expense_groups | {"Stock-in-Hand"}
+    gross_income_groups = sales_groups | direct_income_groups | {"Stock-in-Hand"}
+    gross_expense_groups = purchase_groups | direct_expense_groups | {"Stock-in-Hand"}
     gross_income = sum(amt for g, entries in income.items() if g in gross_income_groups for _, amt in entries)
     gross_expense = -sum(amt for g, entries in expense.items() if g in gross_expense_groups for _, amt in entries)
 

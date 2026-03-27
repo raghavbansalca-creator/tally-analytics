@@ -10,6 +10,7 @@ Benford's Law minimum 100 transactions, zero division protection.
 
 import sqlite3
 import math
+import re
 from collections import Counter
 from datetime import datetime, timedelta
 from defensive_helpers import (
@@ -255,38 +256,47 @@ def check_voucher_gaps(conn):
 
         gaps = []
         for vtype, numbers in by_type.items():
-            # Extract numeric parts
-            numeric_nums = []
+            # Split voucher numbers into prefix-based series
+            # e.g., "PUR/001", "PUR/002", "PURRET/001" → {"PUR/": [1,2], "PURRET/": [1]}
+            series = {}
             for n in numbers:
-                # Try to extract number from patterns like "T000001", "SL/001", "RV-0001"
-                digits = ''.join(c for c in n if c.isdigit())
-                if digits:
-                    numeric_nums.append((int(digits), n))
+                # Extract prefix (non-digit leading part) and trailing number
+                # Handles: "PUR/001", "SL-0001", "T000001", "RV 001", "001"
+                match = re.match(r'^(.*?)(\d+)\s*$', n)
+                if match:
+                    prefix = match.group(1).strip()  # "PUR/", "SL-", "", etc.
+                    num = int(match.group(2))
+                    if prefix not in series:
+                        series[prefix] = []
+                    series[prefix].append((num, n))
 
-            if len(numeric_nums) < 3:
-                continue
+            # Check gaps within each prefix series independently
+            for prefix, numeric_nums in series.items():
+                if len(numeric_nums) < 3:
+                    continue
 
-            numeric_nums.sort()
-            type_gaps = []
-            for i in range(1, len(numeric_nums)):
-                diff = numeric_nums[i][0] - numeric_nums[i-1][0]
-                if diff > 1 and diff <= 10:  # Gap of up to 10
-                    type_gaps.append({
-                        "from_number": numeric_nums[i-1][1],
-                        "to_number": numeric_nums[i][1],
-                        "missing_count": diff - 1,
-                        "from_int": numeric_nums[i-1][0],
-                        "to_int": numeric_nums[i][0],
+                numeric_nums.sort()
+                type_gaps = []
+                for i in range(1, len(numeric_nums)):
+                    diff = numeric_nums[i][0] - numeric_nums[i-1][0]
+                    if diff > 1 and diff <= 10:  # Gap of up to 10
+                        type_gaps.append({
+                            "from_number": numeric_nums[i-1][1],
+                            "to_number": numeric_nums[i][1],
+                            "missing_count": diff - 1,
+                            "from_int": numeric_nums[i-1][0],
+                            "to_int": numeric_nums[i][0],
+                        })
+
+                if type_gaps:
+                    total_missing = sum(g["missing_count"] for g in type_gaps)
+                    series_label = f"{vtype} ({prefix})" if prefix else vtype
+                    gaps.append({
+                        "voucher_type": series_label,
+                        "total_gaps": len(type_gaps),
+                        "total_missing": total_missing,
+                        "details": type_gaps[:10],  # Top 10 gaps
                     })
-
-            if type_gaps:
-                total_missing = sum(g["missing_count"] for g in type_gaps)
-                gaps.append({
-                    "voucher_type": vtype,
-                    "total_gaps": len(type_gaps),
-                    "total_missing": total_missing,
-                    "details": type_gaps[:10],  # Top 10 gaps
-                })
 
         total_flags = sum(g["total_missing"] for g in gaps)
         return {
@@ -430,15 +440,49 @@ def check_cash_limit(conn):
             except:
                 continue
 
+        # Sec 40A(3): cash PAYMENTS > Rs 10,000 to a single party in a day
+        # are disallowable expenses under Income Tax Act
+        cur.execute(f"""
+            SELECT v.DATE, v.PARTYLEDGERNAME, v.VOUCHERTYPENAME, v.VOUCHERNUMBER,
+                   ABS(CAST(a.AMOUNT AS REAL)) as amt{narration_sel}
+            FROM trn_accounting a
+            JOIN trn_voucher v ON a.VOUCHER_GUID = v.GUID
+            WHERE a.LEDGERNAME IN ('{cash_names}')
+              AND a.ISDEEMEDPOSITIVE = 'No'
+              AND ABS(CAST(a.AMOUNT AS REAL)) >= 10000
+              AND ABS(CAST(a.AMOUNT AS REAL)) < 200000
+            ORDER BY ABS(CAST(a.AMOUNT AS REAL)) DESC
+        """)
+
+        sec40a3_breaches = []
+        for row in cur.fetchall():
+            try:
+                amt = float(row["amt"])
+                date_str = str(row["DATE"])
+                dt = datetime.strptime(date_str, "%Y%m%d").strftime("%d-%b-%Y") if len(date_str) == 8 else date_str
+                sec40a3_breaches.append({
+                    "date": dt,
+                    "voucher_type": row["VOUCHERTYPENAME"],
+                    "voucher_number": row["VOUCHERNUMBER"],
+                    "party": row["PARTYLEDGERNAME"] or "",
+                    "amount": amt,
+                    "narration": ((row["NARRATION"] or "")[:100]) if has_narration else "",
+                })
+            except:
+                continue
+
+        all_breaches = breaches + sec40a3_breaches
         return {
-            "check": "Cash Transaction Limits (Sec 269ST)",
+            "check": "Cash Transaction Limits (Sec 269ST + Sec 40A(3))",
             "severity": "High",
-            "flag_count": len(breaches),
-            "status": "fail" if breaches else "pass",
-            "breaches": breaches,
-            "threshold": 200000,
+            "flag_count": len(all_breaches),
+            "status": "fail" if all_breaches else "pass",
+            "breaches_269st": breaches,
+            "breaches_40a3": sec40a3_breaches,
+            "threshold_269st": 200000,
+            "threshold_40a3": 10000,
             "cash_ledgers": cash_ledgers,
-            "description": "Section 269ST prohibits cash receipts of Rs 2,00,000 or more. Penalty equals the cash amount received."
+            "description": "Sec 269ST: cash receipts >= Rs 2L prohibited. Sec 40A(3): cash payments > Rs 10K disallowable."
         }
     except Exception as e:
         return {"check": "Cash Transaction Limits", "severity": "High", "flag_count": 0,
@@ -675,7 +719,7 @@ def check_credit_balance_debtors(conn):
             "severity": "Medium",
             "flag_count": len(flagged),
             "status": "fail" if flagged else "pass",
-            "parties": flagged[:30],
+            "parties": flagged,
             "description": "Debtors with credit balance indicate advance receipts not adjusted or fictitious debtors."
         }
     except Exception as e:

@@ -426,7 +426,8 @@ def gstr1_b2b_invoices(conn, month=None):
     if has_unified:
         cn_types = list(vch_families.get("credit_note", set()))
     else:
-        cn_types = ["Credit Note"]
+        _cn_fam = _get_voucher_type_families(conn)
+        cn_types = list(_cn_fam.get("credit_note", {"Credit Note"}))
     if cn_types:
         cn_ph = ",".join(["?"] * len(cn_types))
         cn_exclude = f"AND v.VOUCHERTYPENAME NOT IN ({cn_ph})"
@@ -540,7 +541,8 @@ def gstr1_b2c_invoices(conn, month=None):
     if has_unified:
         cn_types = list(vch_families.get("credit_note", set()))
     else:
-        cn_types = ["Credit Note"]
+        _cn_fam = _get_voucher_type_families(conn)
+        cn_types = list(_cn_fam.get("credit_note", {"Credit Note"}))
     if cn_types:
         cn_ph = ",".join(["?"] * len(cn_types))
         cn_exclude = f"AND v.VOUCHERTYPENAME NOT IN ({cn_ph})"
@@ -628,7 +630,8 @@ def gstr1_credit_notes(conn, month=None):
     vch_families = _get_voucher_type_families(conn)
     cn_types = list(vch_families.get("credit_note", set()))
     if not cn_types:
-        cn_types = ["Credit Note"]
+        _cn_fam = _get_voucher_type_families(conn)
+        cn_types = list(_cn_fam.get("credit_note", {"Credit Note"}))
     cn_ph = ",".join(["?"] * len(cn_types))
 
     all_output = gst["output_cgst"] + gst["output_sgst"] + gst["output_igst"]
@@ -864,8 +867,11 @@ def gstr1_monthly_summary(conn):
 def input_tax_invoices(conn, month=None):
     """Purchase-wise input tax credit detail.
     Detects by presence of input GST entries (works for any voucher type).
+    For unified GST ledgers, filters by purchase voucher types to avoid
+    picking up sales, receipts, payments, etc.
     """
     gst = _detect_gst_ledgers(conn)
+    has_unified = _has_unified_gst(gst)
     month_filter = f"AND SUBSTR(v.DATE,1,6) = '{month}'" if month else ""
 
     vcols = _get_cols(conn, "trn_voucher")
@@ -876,16 +882,44 @@ def input_tax_invoices(conn, month=None):
     if not all_input:
         return []
     placeholders = ",".join(["?"] * len(all_input))
+
+    # For unified GST ledgers, restrict to purchase voucher types to avoid
+    # picking up sales, receipts, credit notes, etc.
+    vchtype_filter = ""
+    vchtype_params = []
+    if has_unified:
+        vch_families = _get_voucher_type_families(conn)
+        purchase_types = list(vch_families.get("purchase", set()))
+        if not purchase_types:
+            purchase_types = ["Purchase"]
+        vchtype_ph = ",".join(["?"] * len(purchase_types))
+        vchtype_filter = f"AND v.VOUCHERTYPENAME IN ({vchtype_ph})"
+        vchtype_params = purchase_types
+
+    # Build DN exclusion using voucher type families
+    dn_exclude = ""
+    dn_params = []
+    if has_unified:
+        dn_types = list(vch_families.get("debit_note", set()))
+    else:
+        dn_types = ["Debit Note"]
+    if dn_types:
+        dn_ph = ",".join(["?"] * len(dn_types))
+        dn_exclude = f"AND v.VOUCHERTYPENAME NOT IN ({dn_ph})"
+        dn_params = dn_types
+
     try:
+        params = all_input + vchtype_params + dn_params
         vouchers = conn.execute(f"""
             SELECT DISTINCT v.GUID, v.DATE, v.VOUCHERNUMBER, v.PARTYLEDGERNAME, {gstin_col}, {pos_col}
             FROM trn_voucher v
             JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
             WHERE a.LEDGERNAME IN ({placeholders})
-              AND v.VOUCHERTYPENAME != 'Debit Note'
+              {vchtype_filter}
+              {dn_exclude}
               {month_filter}
             ORDER BY v.DATE, v.VOUCHERNUMBER
-        """, all_input).fetchall()
+        """, params).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -1047,15 +1081,24 @@ def input_tax_monthly_summary(conn):
     except sqlite3.OperationalError:
         return []
 
-    # Identify purchase and debit note voucher types dynamically
-    purchase_vchtypes = set()
-    dn_vchtypes = set()
-    for month, ledger, signed, absolute, vchtype in all_rows:
-        if ledger in all_input_set and absolute > 0:
-            if vchtype and "debit" in vchtype.lower():
-                dn_vchtypes.add(vchtype)
-            else:
-                purchase_vchtypes.add(vchtype)
+    # Identify purchase and debit note voucher types
+    has_unified = _has_unified_gst(gst)
+    if has_unified:
+        # For unified ledgers, use voucher type families to avoid misclassifying
+        # Sales/Receipt/Journal as purchase types
+        vch_families = _get_voucher_type_families(conn)
+        purchase_vchtypes = vch_families.get("purchase", {"Purchase"})
+        dn_vchtypes = vch_families.get("debit_note", {"Debit Note"})
+    else:
+        # Detect dynamically from data
+        purchase_vchtypes = set()
+        dn_vchtypes = set()
+        for month, ledger, signed, absolute, vchtype in all_rows:
+            if ledger in all_input_set and absolute > 0:
+                if vchtype and "debit" in vchtype.lower():
+                    dn_vchtypes.add(vchtype)
+                else:
+                    purchase_vchtypes.add(vchtype)
 
     monthly = defaultdict(lambda: {
         "purchase_taxable": 0, "dn_taxable": 0,

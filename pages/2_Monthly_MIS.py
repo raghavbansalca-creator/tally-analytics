@@ -385,7 +385,11 @@ def load_all_data(date_from=None, date_to=None, voucher_types_tuple=None):
     _stock_groups = get_groups_by_nature(conn, 'stock') if hasattr(get_groups_by_nature, '__call__') else []
     if not _stock_groups:
         try:
-            _stock_groups = [r[0] for r in conn.execute("SELECT NAME FROM mst_group WHERE UPPER(NAME) LIKE '%STOCK%HAND%' OR UPPER(RESERVEDNAME) LIKE '%STOCK%HAND%'").fetchall()]
+            _mis_grp_cols = {r[1] for r in conn.execute("PRAGMA table_info(mst_group)").fetchall()}
+            if "RESERVEDNAME" in _mis_grp_cols:
+                _stock_groups = [r[0] for r in conn.execute("SELECT NAME FROM mst_group WHERE UPPER(NAME) LIKE '%STOCK%HAND%' OR UPPER(RESERVEDNAME) LIKE '%STOCK%HAND%'").fetchall()]
+            else:
+                _stock_groups = [r[0] for r in conn.execute("SELECT NAME FROM mst_group WHERE UPPER(NAME) LIKE '%STOCK%HAND%'").fetchall()]
         except Exception:
             _stock_groups = []
     _mis_cols_s = {r[1] for r in conn.execute("PRAGMA table_info(mst_ledger)").fetchall()}

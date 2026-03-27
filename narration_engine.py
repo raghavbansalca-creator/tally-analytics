@@ -147,9 +147,10 @@ CATEGORIES = [
         "name": "Contractor Payments",
         "patterns": [
             r"\bcontractor\b", r"\bsub-contractor\b",
-            r"\blabour\b",
+            r"\blabour\b", r"\bkaarigar\b", r"\bkarigar\b", r"\bartisan\b",
             r"\bworks contract\b", r"\bjob work\b", r"\bfabrication\b",
             r"\bconstruction\s+(?:work|site|charge|cost|material)\b",
+            r"\bstitching\b", r"\bcutting\b", r"\bassembly\b",
         ],
         "comment": "Contractor payment - verify TDS u/s 194C",
         "severity": "LOW",
@@ -365,16 +366,20 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
     select_parts.append("v.PARTYLEDGERNAME" if has_party else "'' as PARTYLEDGERNAME")
     select_parts.append("v.NARRATION" if has_narration else "'' as NARRATION")
 
-    # Amount subquery — only if trn_accounting has the right columns
+    # Amount: pre-aggregate per voucher via JOIN instead of correlated subquery
+    # (correlated subquery is O(n*m), JOIN with GROUP BY is O(n+m))
     if has_amount_col and has_voucher_guid:
-        select_parts.append(
-            "COALESCE("
-            "(SELECT SUM(ABS(CAST(a.AMOUNT AS REAL))) "
-            "FROM trn_accounting a "
-            "WHERE a.VOUCHER_GUID = v.GUID AND CAST(a.AMOUNT AS REAL) > 0), 0) as amount"
+        select_parts.append("COALESCE(va.amount, 0) as amount")
+        amount_join = (
+            "LEFT JOIN ("
+            "  SELECT VOUCHER_GUID, SUM(ABS(CAST(AMOUNT AS REAL))) as amount"
+            "  FROM trn_accounting WHERE CAST(AMOUNT AS REAL) > 0"
+            "  GROUP BY VOUCHER_GUID"
+            ") va ON va.VOUCHER_GUID = v.GUID"
         )
     else:
         select_parts.append("0 as amount")
+        amount_join = ""
 
     # Build query
     date_filter = ""
@@ -389,6 +394,7 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
     sql = f"""
     SELECT {', '.join(select_parts)}
     FROM trn_voucher v
+    {amount_join}
     WHERE 1=1{date_filter}
     ORDER BY v.DATE
     """
@@ -398,6 +404,22 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
     except Exception as e:
         conn.close()
         return _empty_result(f"Query failed: {e}")
+
+    # Pre-load ledger→parent group mapping for group-based classification
+    # This catches KARIGAR artisans and similar patterns where narration is empty
+    # but the party's GROUP reveals the transaction nature.
+    _ledger_parent = {}
+    _contractor_group_keywords = {"karigar", "kaarigar", "artisan", "labour", "contractor",
+                                  "job work", "sub-contract", "fabricat"}
+    _contractor_parties = set()
+    try:
+        for led_name, led_parent in conn.execute("SELECT NAME, PARENT FROM mst_ledger").fetchall():
+            _ledger_parent[led_name] = led_parent or ""
+            # Walk up group hierarchy to check for contractor-related groups
+            if led_parent and any(kw in led_parent.lower() for kw in _contractor_group_keywords):
+                _contractor_parties.add(led_name)
+    except Exception:
+        pass
 
     conn.close()
 
@@ -438,6 +460,26 @@ def analyze_all_narrations(db_path: str, from_date=None, to_date=None) -> dict:
                     "category": "Cash Transactions",
                     "comment": "Cash transaction (party is Cash ledger) - verify Sec 269ST/269SS compliance",
                     "severity": "MEDIUM",
+                })
+
+        # Party/group-based classification (catches vouchers with empty narrations)
+        # Uses pre-loaded ledger→group mapping to detect KARIGAR, contractor groups, etc.
+        if party and not any(m["category"] == "Contractor Payments" for m in matches):
+            party_lower = party.lower()
+            # Check 1: party name contains contractor keywords
+            contractor_name_kw = ["karigar", "kaarigar", "artisan", "labour", "contractor",
+                                  "mistri", "mason", "carpenter", "plumber", "electrician",
+                                  "fabricat", "job work"]
+            is_contractor = any(kw in party_lower for kw in contractor_name_kw)
+            # Check 2: party's GROUP contains contractor keywords (e.g., KARIGAR group)
+            if not is_contractor and party in _contractor_parties:
+                is_contractor = True
+            if is_contractor:
+                parent_group = _ledger_parent.get(party, "")
+                matches.append({
+                    "category": "Contractor Payments",
+                    "comment": f"Contractor/artisan payment (party: {party}, group: {parent_group}) - verify TDS u/s 194C",
+                    "severity": "LOW",
                 })
 
         if not matches:

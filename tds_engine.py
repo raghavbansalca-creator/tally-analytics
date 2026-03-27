@@ -158,7 +158,58 @@ def _classify_tds_section(ledger_name):
     if "PURCHASE" in upper and "GOOD" in upper:
         return "194Q"
 
+    # Rate-based inference: extract percentage from ledger name
+    rate_match = re.search(r'@?\s*(\d+\.?\d*)\s*%', upper)
+    if rate_match:
+        rate = float(rate_match.group(1))
+        # Map common TDS rates to sections
+        if rate == 0.1:
+            return "194Q"  # Purchase of goods
+        elif rate == 1.0:
+            return "194C"  # Contractor (individual)
+        elif rate == 2.0:
+            return "194C"  # Contractor (non-individual) or 194I(a) rent
+        elif rate == 5.0:
+            return "194H"  # Commission/brokerage (or 194IA property)
+        elif rate == 7.5:
+            return "194J"  # Professional/technical (reduced COVID rate)
+        elif rate == 10.0:
+            return "194J"  # Professional/technical (standard rate)
+        elif rate == 20.0:
+            return "194J"  # Without PAN rate
+        elif rate == 0.075:
+            return "194Q"  # Reduced rate during COVID
+
+    # Payable + parent-based context: if parent suggests provisions and name is generic
+    if "PAYABLE" in upper and rate_match:
+        return "194Q" if float(rate_match.group(1)) <= 0.1 else "Other"
+
     return "Other"
+
+
+def _classify_tds_category(parent, upper_parent):
+    """Classify a TDS ledger as receivable, payable, or expense based on parent group.
+
+    - receivable: TDS deducted BY customers on our income (asset — under Deposits, Loans & Advances)
+    - payable: TDS deducted BY us on payments (liability — under Provisions, Current Liabilities, Duties)
+    - expense: TDS cost (under Indirect/Direct Expenses)
+    """
+    # Asset-side parents → receivable
+    asset_keywords = ["DEPOSIT", "LOAN", "ADVANCE", "ASSET", "RECEIVABLE", "CURRENT ASSET"]
+    if any(kw in upper_parent for kw in asset_keywords):
+        return "receivable"
+
+    # Liability-side parents → payable
+    liability_keywords = ["PROVISION", "PAYABLE", "LIABILIT", "DUTI", "TAX"]
+    if any(kw in upper_parent for kw in liability_keywords):
+        return "payable"
+
+    # Expense-side parents → expense
+    expense_keywords = ["EXPENSE", "INDIRECT", "DIRECT"]
+    if any(kw in upper_parent for kw in expense_keywords):
+        return "expense"
+
+    return "unknown"
 
 
 # ── TDS LEDGER DETECTION ───────────────────────────────────────────────────
@@ -198,10 +249,13 @@ def _detect_tds_ledgers(conn):
 
         if is_tds:
             section = _classify_tds_section(name)
+            # Classify by parent group: receivable (asset), payable (liability), or expense
+            category = _classify_tds_category(parent or "", upper_parent)
             result.append({
                 "name": name,
                 "parent": parent or "",
                 "section": section,
+                "category": category,
             })
 
     setattr(_detect_tds_ledgers, cache_key, result)
@@ -332,21 +386,34 @@ def tds_summary_by_section(conn, date_from=None, date_to=None):
 def tds_party_wise(conn, section=None, date_from=None, date_to=None):
     """Party-wise TDS detail.
     Returns list of dicts with party, PAN, section, gross payment, TDS amount, effective rate.
+
+    Only considers TDS PAYABLE ledgers (liability-side) for deduction analysis.
+    Excludes TDS receivable (asset) and TDS expense ledgers.
+    Excludes Payment/Receipt vouchers (remittance to govt) — only counts
+    Journal/Purchase/Sales where TDS is actually deducted.
     """
-    tds_names = _tds_ledger_names(conn)
-    section_map = _tds_ledger_section_map(conn)
+    all_tds = _detect_tds_ledgers(conn)
+    # Only use payable TDS ledgers for deduction analysis
+    payable_tds = [ld for ld in all_tds if ld.get("category") == "payable"]
+    if not payable_tds:
+        # Fallback: if no category info, use all (backwards compatibility)
+        payable_tds = all_tds
+    tds_names = {ld["name"] for ld in payable_tds}
+    section_map = {ld["name"]: ld["section"] for ld in payable_tds}
     if not tds_names:
         return []
 
     placeholders = ",".join(["?"] * len(tds_names))
     date_filter = _build_date_filter(date_from, date_to)
 
-    # Get all vouchers that have TDS entries
+    # Get vouchers with TDS entries, EXCLUDING Payment/Receipt (remittance to govt)
+    # Payment vouchers move TDS from payable to bank — not a new deduction
     rows = conn.execute(f"""
         SELECT DISTINCT v.GUID, v.PARTYLEDGERNAME, v.DATE
         FROM trn_voucher v
         JOIN trn_accounting a ON a.VOUCHER_GUID = v.GUID
         WHERE a.LEDGERNAME IN ({placeholders})
+          AND v.VOUCHERTYPENAME NOT IN ('Payment', 'Receipt', 'Contra')
           {date_filter}
     """, list(tds_names)).fetchall()
 
@@ -393,11 +460,41 @@ def tds_party_wise(conn, section=None, date_from=None, date_to=None):
     # Get PAN for parties
     pan_map = _get_party_pan_map(conn)
 
+    # For parties where gross = TDS (Journal reclassification entries),
+    # back-calculate gross from the TDS rate using TDS_SECTIONS reference.
+    # Also try to get actual purchase totals from trn_accounting.
     results = []
     for party in sorted(party_data.keys()):
         d = party_data[party]
         tds_amt = round(d["tds_amount"], 2)
         gross = round(d["gross_payment"], 2)
+
+        # If gross ≈ TDS (100% effective rate), it's likely a Journal reclassification.
+        # Back-calculate from the section's statutory rate, or query actual purchases.
+        if gross > 0 and abs(gross - tds_amt) < 1.0:
+            # Try to get actual purchase total for this party
+            try:
+                purchase_row = conn.execute("""
+                    SELECT ABS(SUM(CAST(a.AMOUNT AS REAL)))
+                    FROM trn_accounting a
+                    JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
+                    WHERE v.PARTYLEDGERNAME = ?
+                      AND a.LEDGERNAME = ?
+                      AND CAST(a.AMOUNT AS REAL) > 0
+                """, (party, party)).fetchone()
+                if purchase_row and purchase_row[0] and purchase_row[0] > tds_amt:
+                    gross = round(purchase_row[0], 2)
+            except Exception:
+                pass
+
+            # Fallback: back-calculate from section rate
+            if abs(gross - tds_amt) < 1.0:
+                for sec in d["sections"]:
+                    sec_info = TDS_SECTIONS.get(sec)
+                    if sec_info and sec_info["rate"] > 0:
+                        gross = round(tds_amt / (sec_info["rate"] / 100), 2)
+                        break
+
         eff_rate = round((tds_amt / gross * 100), 2) if gross > 0 else 0.0
         sections_str = ", ".join(sorted(d["sections"]))
         pan = pan_map.get(party, "")
@@ -586,21 +683,49 @@ def tds_threshold_check(conn, date_from=None, date_to=None):
     except Exception:
         expense_groups = {"Indirect Expenses"}
 
-    if not expense_groups:
+    # Also get Sundry Creditor groups (for contractor payments like KARIGAR)
+    creditor_groups = set()
+    try:
+        queue = ["Sundry Creditors"]
+        while queue:
+            parent = queue.pop(0)
+            creditor_groups.add(parent)
+            children = conn.execute(
+                "SELECT NAME FROM mst_group WHERE PARENT = ?", (parent,)
+            ).fetchall()
+            for (child,) in children:
+                if child not in creditor_groups:
+                    queue.append(child)
+    except Exception:
+        creditor_groups = {"Sundry Creditors"}
+
+    all_check_groups = expense_groups | creditor_groups
+
+    if not all_check_groups:
         return []
 
-    # Get expense ledgers
-    eg_ph = ",".join(["?"] * len(expense_groups))
-    expense_ledgers = conn.execute(f"""
+    # Get ledgers from all groups
+    eg_ph = ",".join(["?"] * len(all_check_groups))
+    all_ledgers = conn.execute(f"""
         SELECT name, parent FROM mst_ledger
         WHERE parent IN ({eg_ph})
-    """, list(expense_groups)).fetchall()
+    """, list(all_check_groups)).fetchall()
 
-    # Map expense ledger names to possible TDS sections
+    # Map ledger names to possible TDS sections
     expense_ledger_sections = {}
-    for name, parent in expense_ledgers:
+    contractor_group_keywords = {"karigar", "kaarigar", "artisan", "labour", "contractor",
+                                 "job work", "sub-contract", "fabricat"}
+    for name, parent in all_ledgers:
         upper = (name + " " + parent).upper()
-        if "RENT" in upper:
+        parent_lower = (parent or "").lower()
+        if parent in creditor_groups and parent not in expense_groups:
+            # Creditor ledger — check if parent group suggests contractor (194C)
+            if any(kw in parent_lower for kw in contractor_group_keywords):
+                expense_ledger_sections[name] = "194C"
+            else:
+                # General sundry creditor — check for 194Q (purchase of goods > 50L)
+                expense_ledger_sections[name] = "194Q"
+        elif "RENT" in upper:
             expense_ledger_sections[name] = "194I"
         elif "PROFESSION" in upper or "CONSULT" in upper or "LEGAL" in upper or "TECHNICAL" in upper:
             expense_ledger_sections[name] = "194J"
@@ -617,15 +742,20 @@ def tds_threshold_check(conn, date_from=None, date_to=None):
     if not expense_ledger_sections:
         return []
 
-    # Get all payment vouchers to sundry creditors / parties
-    # Find vouchers with expense ledger entries + party
+    # Get payment amounts per party per ledger
+    # Split into expense-side (negative amounts = debit) and creditor-side (positive = credit)
+    # For expense ledgers: debit entries represent payments
+    # For creditor ledgers: credit entries represent amounts owed
     exp_names = list(expense_ledger_sections.keys())
     exp_ph = ",".join(["?"] * len(exp_names))
+
+    creditor_ledger_names = {name for name, parent in all_ledgers if parent in creditor_groups}
 
     rows = conn.execute(f"""
         SELECT v.PARTYLEDGERNAME,
                a.LEDGERNAME,
-               ABS(SUM(CAST(a.AMOUNT AS REAL))) as total_paid
+               SUM(CASE WHEN CAST(a.AMOUNT AS REAL) > 0 THEN CAST(a.AMOUNT AS REAL) ELSE 0 END) as credit_total,
+               SUM(CASE WHEN CAST(a.AMOUNT AS REAL) < 0 THEN ABS(CAST(a.AMOUNT AS REAL)) ELSE 0 END) as debit_total
         FROM trn_accounting a
         JOIN trn_voucher v ON v.GUID = a.VOUCHER_GUID
         WHERE a.LEDGERNAME IN ({exp_ph})
@@ -634,9 +764,21 @@ def tds_threshold_check(conn, date_from=None, date_to=None):
         GROUP BY v.PARTYLEDGERNAME, a.LEDGERNAME
     """, exp_names).fetchall()
 
+    # Convert to total_paid using the appropriate side
+    processed_rows = []
+    for party, ledger, credit_total, debit_total in rows:
+        if ledger in creditor_ledger_names:
+            # Creditor: credit entries = amounts purchased/owed
+            total = _safe_float(credit_total)
+        else:
+            # Expense: debit entries = amounts spent
+            total = _safe_float(debit_total)
+        if total > 0:
+            processed_rows.append((party, ledger, total))
+
     # Aggregate per party
     party_payments = defaultdict(lambda: {"total": 0.0, "sections": set(), "expense_ledgers": set()})
-    for party, ledger, total in rows:
+    for party, ledger, total in processed_rows:
         sec = expense_ledger_sections.get(ledger)
         party_payments[party]["total"] += _safe_float(total)
         if sec:

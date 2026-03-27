@@ -525,6 +525,21 @@ class TallyDataExtractor:
         # Second pass: link children and compute levels
         self._compute_group_levels()
 
+        # Third pass: add alias entries for display names used in mst_ledger.PARENT
+        # Tally stores canonical names in mst_group.NAME (e.g., "Expenses (Indirect)")
+        # but mst_ledger.PARENT uses display names (e.g., "Indirect Expenses").
+        alias_map = {
+            "Expenses (Indirect)": "Indirect Expenses",
+            "Expenses (Direct)": "Direct Expenses",
+            "Income (Indirect)": "Indirect Incomes",
+            "Income (Direct)": "Direct Incomes",
+            "Deposits (Asset)": "Deposits",
+            "Bank OCC A/c": "Bank OD A/c",
+        }
+        for canonical, display in alias_map.items():
+            if canonical in self.group_tree and display not in self.group_tree:
+                self.group_tree[display] = self.group_tree[canonical]
+
         logger.info(f"Built group hierarchy with {len(self.group_tree)} groups")
         return self.group_tree
 
@@ -971,14 +986,14 @@ class ScheduleIIIClassifier:
 
         # RULE 4: Trade Receivables - identify MSME
         elif schedule_line == "trade_receivables":
-            if "msme" in ledger.name.lower():
+            if self._is_msme_ledger(ledger):
                 classified_sub = "msme"
             else:
                 classified_sub = "others"
 
         # RULE 5: Trade Payables - identify MSME
         elif schedule_line == "trade_payables":
-            if "msme" in ledger.name.lower():
+            if self._is_msme_ledger(ledger):
                 classified_sub = "msme"
             else:
                 classified_sub = "others"
@@ -999,6 +1014,26 @@ class ScheduleIIIClassifier:
             is_reclassified=is_reclassified,
             reclassification_note=reclassification_note,
         )
+
+    def _is_msme_ledger(self, ledger) -> bool:
+        """Check if a ledger is MSME by name OR group ancestry.
+
+        Checks both:
+        1. Ledger name contains 'msme' (e.g., "ABC Pvt Ltd - MSME")
+        2. Any ancestor group contains 'msme' (e.g., Sundry Creditors → MSME-MICRO → ledger)
+        """
+        if "msme" in ledger.name.lower():
+            return True
+        # Walk up group hierarchy looking for MSME groups
+        current = ledger.parent_group
+        visited = set()
+        while current and current != "Primary" and current not in visited:
+            visited.add(current)
+            if "msme" in current.lower():
+                return True
+            node = self.extractor.group_tree.get(current)
+            current = node.parent if node else None
+        return False
 
     def _classify_pl_expense(self, ledger_name: str, parent_group: str) -> Optional[Tuple[str, str]]:
         """

@@ -6,3 +6,4 @@ python/
 *.egg-info/
 .streamlit/
 Schedule_III_*.xlsx
+.DS_Store
